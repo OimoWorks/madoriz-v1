@@ -12,7 +12,9 @@
     "@anthropic-ai/sdk": "^0.96.0",
     "@supabase/supabase-js": "^2.105.4",
     "@types/three": "^0.184.1",
+    "jspdf": "^4.2.1",
     "next": "14.2.35",
+    "pdfjs-dist": "^5.7.284",
     "react": "^18",
     "react-dom": "^18",
     "three": "^0.184.0"

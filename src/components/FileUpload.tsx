@@ -11,11 +11,13 @@ export default function FileUpload({ onFile, loading }: FileUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
 
+  const ACCEPTED_TYPES = ["image/png", "image/jpeg", "application/pdf"];
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragging(false);
     const file = e.dataTransfer.files[0];
-    if (file && (file.type === "image/png" || file.type === "image/jpeg")) {
+    if (file && ACCEPTED_TYPES.includes(file.type)) {
       onFile(file);
     }
   };
@@ -40,7 +42,7 @@ export default function FileUpload({ onFile, loading }: FileUploadProps) {
       <input
         ref={inputRef}
         type="file"
-        accept="image/png,image/jpeg"
+        accept="image/png,image/jpeg,application/pdf"
         className="hidden"
         onChange={handleChange}
       />
@@ -52,7 +54,7 @@ export default function FileUpload({ onFile, loading }: FileUploadProps) {
           <p className="text-gray-700 font-medium mb-1">
             間取り図をドラッグ&ドロップ
           </p>
-          <p className="text-sm text-gray-400">または クリックして選択（PNG / JPG）</p>
+          <p className="text-sm text-gray-400">または クリックして選択（PNG / JPG / PDF）</p>
         </>
       )}
     </div>

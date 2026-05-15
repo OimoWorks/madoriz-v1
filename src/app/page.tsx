@@ -7,6 +7,8 @@ import EditPanel from "@/components/EditPanel";
 import RoomLegend from "@/components/RoomLegend";
 import { Room } from "@/lib/types";
 import { uploadFloorPlanImage } from "@/lib/supabase";
+import { renderPdfPageToBase64 } from "@/lib/pdf-utils";
+import { exportFloorPlanPdf } from "@/lib/export-pdf";
 
 const ThreeViewer = dynamic(() => import("@/components/ThreeViewer"), { ssr: false });
 
@@ -23,19 +25,35 @@ export default function HomePage() {
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const handleFile = async (file: File) => {
     setError(null);
     setLoading(true);
     setShareUrl(null);
     try {
+      // Always upload the original file (PDF or image) to Supabase Storage
       const url = await uploadFloorPlanImage(file);
       setImageUrl(url);
+
+      // For PDF: render page 1 to PNG client-side, send base64 to analyze
+      // For images: send the Supabase URL as-is
+      type AnalyzePayload =
+        | { imageUrl: string }
+        | { imageBase64: string; mediaType: string };
+
+      let payload: AnalyzePayload;
+      if (file.type === "application/pdf") {
+        const imageBase64 = await renderPdfPageToBase64(file);
+        payload = { imageBase64, mediaType: "image/png" };
+      } else {
+        payload = { imageUrl: url };
+      }
 
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageUrl: url }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "解析に失敗しました");
@@ -109,6 +127,18 @@ export default function HomePage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleExportPdf = async () => {
+    if (rooms.length === 0) return;
+    setExporting(true);
+    try {
+      await exportFloorPlanPdf(rooms, note || null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "PDF出力に失敗しました");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen bg-gray-100">
       <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between shadow-sm">
@@ -117,13 +147,22 @@ export default function HomePage() {
           <p className="text-xs text-gray-500">間取り図をアップロードしてAIで3D表示</p>
         </div>
         {rooms.length > 0 && (
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-          >
-            {saving ? "保存中..." : "保存して共有URLを発行"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleExportPdf}
+              disabled={exporting}
+              className="bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-800 disabled:opacity-50 transition-colors"
+            >
+              {exporting ? "出力中..." : "平面図をPDFで出力"}
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            >
+              {saving ? "保存中..." : "保存して共有URLを発行"}
+            </button>
+          </div>
         )}
       </header>
 

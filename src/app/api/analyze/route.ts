@@ -5,22 +5,30 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export async function POST(req: NextRequest) {
   try {
-    const { imageUrl } = await req.json();
-    if (!imageUrl) {
-      return NextResponse.json({ error: "imageUrl is required" }, { status: 400 });
+    const { imageUrl, imageBase64, mediaType: clientMediaType } = await req.json();
+
+    if (!imageUrl && !imageBase64) {
+      return NextResponse.json({ error: "imageUrl or imageBase64 is required" }, { status: 400 });
     }
 
-    // Fetch image and convert to base64
-    const res = await fetch(imageUrl);
-    if (!res.ok) throw new Error("Failed to fetch image");
-    const arrayBuffer = await res.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString("base64");
-    const contentType = res.headers.get("content-type") || "image/jpeg";
-    const mediaType = contentType.split(";")[0] as
-      | "image/jpeg"
-      | "image/png"
-      | "image/gif"
-      | "image/webp";
+    type SupportedMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+
+    let base64: string;
+    let mediaType: SupportedMediaType;
+
+    if (imageBase64) {
+      // PDF converted to PNG on client side
+      base64 = imageBase64;
+      mediaType = (clientMediaType ?? "image/png") as SupportedMediaType;
+    } else {
+      // Fetch image from URL and convert to base64
+      const res = await fetch(imageUrl);
+      if (!res.ok) throw new Error("Failed to fetch image");
+      const arrayBuffer = await res.arrayBuffer();
+      base64 = Buffer.from(arrayBuffer).toString("base64");
+      const contentType = res.headers.get("content-type") || "image/jpeg";
+      mediaType = contentType.split(";")[0] as SupportedMediaType;
+    }
 
     const message = await client.messages.create({
       model: "claude-sonnet-4-20250514",
