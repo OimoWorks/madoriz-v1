@@ -12,76 +12,6 @@ const ROOM_COLORS = [
 
 const WALL_COLOR = 0xf5f0e8;  // cream white
 const CEIL_COLOR = 0xfafafa;  // near white
-const ROOF_COLOR = 0x7a6040;  // dark brown
-
-// Build a gabled roof mesh covering all rooms. Defined outside component (no React deps).
-function makeRoofMesh(rooms: Room[]): THREE.Mesh | null {
-  if (rooms.length === 0) return null;
-
-  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-  let maxH = 0;
-  for (const r of rooms) {
-    minX = Math.min(minX, r.x);       maxX = Math.max(maxX, r.x + r.w);
-    minZ = Math.min(minZ, r.y);       maxZ = Math.max(maxZ, r.y + r.h);
-    maxH = Math.max(maxH, r.wallHeight);
-  }
-
-  const ov = 0.6;
-  const x0 = minX - ov, x1 = maxX + ov;
-  const z0 = minZ - ov, z1 = maxZ + ov;
-  const spanX = x1 - x0, spanZ = z1 - z0;
-  const rh = Math.min(spanX, spanZ) * 0.45;
-  const base = maxH;
-
-  const pos: number[] = [];
-  const idx: number[] = [];
-
-  if (spanX <= spanZ) {
-    // Ridge runs along Z
-    const cx = (x0 + x1) / 2;
-    pos.push(
-      x0, base, z0,        // 0 front-left eave
-      x1, base, z0,        // 1 front-right eave
-      x1, base, z1,        // 2 back-right eave
-      x0, base, z1,        // 3 back-left eave
-      cx, base + rh, z0,   // 4 front ridge
-      cx, base + rh, z1,   // 5 back ridge
-    );
-    idx.push(
-      0, 4, 5,  0, 5, 3,  // left slope
-      1, 2, 5,  1, 5, 4,  // right slope
-      0, 1, 4,            // front gable
-      3, 5, 2,            // back gable
-    );
-  } else {
-    // Ridge runs along X
-    const cz = (z0 + z1) / 2;
-    pos.push(
-      x0, base, z0,        // 0 front-left eave
-      x1, base, z0,        // 1 front-right eave
-      x1, base, z1,        // 2 back-right eave
-      x0, base, z1,        // 3 back-left eave
-      x0, base + rh, cz,   // 4 left ridge
-      x1, base + rh, cz,   // 5 right ridge
-    );
-    idx.push(
-      0, 1, 5,  0, 5, 4,  // front slope
-      3, 4, 5,  3, 5, 2,  // back slope
-      0, 4, 3,            // left gable
-      1, 2, 5,            // right gable
-    );
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-  geo.setIndex(idx);
-  geo.computeVertexNormals();
-
-  const mat = new THREE.MeshLambertMaterial({ color: ROOF_COLOR, side: THREE.DoubleSide });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  return mesh;
-}
 
 interface ThreeViewerProps {
   rooms: Room[];
@@ -106,7 +36,6 @@ export default function ThreeViewer({
   const controlsRef = useRef<OrbitControls | null>(null);
   const meshMapRef = useRef<Map<string, THREE.Mesh>>(new Map());
   const edgesMapRef = useRef<Map<string, THREE.LineSegments>>(new Map());
-  const roofMeshRef = useRef<THREE.Mesh | null>(null);
   const animFrameRef = useRef<number>(0);
   const isDraggingRef = useRef(false);
   const dragRoomIdRef = useRef<string | null>(null);
@@ -245,7 +174,6 @@ export default function ThreeViewer({
       sceneRef.current = null;
       meshMapRef.current.clear();
       edgesMapRef.current.clear();
-      roofMeshRef.current = null;
       setSceneReady(false);
     };
   }, []);
@@ -305,18 +233,6 @@ export default function ThreeViewer({
       }
     });
 
-    // Rebuild roof whenever rooms change
-    if (roofMeshRef.current) {
-      scene.remove(roofMeshRef.current);
-      roofMeshRef.current.geometry.dispose();
-      (roofMeshRef.current.material as THREE.Material).dispose();
-      roofMeshRef.current = null;
-    }
-    const roof = makeRoofMesh(rooms);
-    if (roof) {
-      scene.add(roof);
-      roofMeshRef.current = roof;
-    }
   }, [rooms, selectedRoomId, buildRoom, sceneReady]);
 
   // Mouse/touch event handlers — registered once, use refs for live data
