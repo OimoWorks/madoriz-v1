@@ -103,8 +103,6 @@ export default function ThreeViewer({
   const dragRoomIdRef = useRef<string | null>(null);
   // 'pending' = selected, showing ✓/✗ buttons; 'active' = drag enabled
   const moveModeRef = useRef<"pending" | "active" | null>(null);
-  // Final position to commit on pointer-up (avoids mid-drag React re-renders)
-  const pendingMoveRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const dragPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
   const raycasterRef = useRef(new THREE.Raycaster());
   const mouseRef = useRef(new THREE.Vector2());
@@ -126,7 +124,6 @@ export default function ThreeViewer({
     if (!selectedRoomId) {
       moveModeRef.current = null;
       dragRoomIdRef.current = null;
-      pendingMoveRef.current = null;
       if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
     }
   }, [selectedRoomId]);
@@ -367,7 +364,6 @@ export default function ThreeViewer({
   const handleCancel = useCallback(() => {
     moveModeRef.current = null;
     dragRoomIdRef.current = null;
-    pendingMoveRef.current = null;
     if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
     onSelectRoomRef.current(null);
   }, []);
@@ -410,7 +406,6 @@ export default function ThreeViewer({
         onSelectRoomRef.current(null);
         dragRoomIdRef.current = null;
         moveModeRef.current = null;
-        pendingMoveRef.current = null;
         if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
       }
     };
@@ -438,25 +433,19 @@ export default function ThreeViewer({
       const snappedX = Math.round(target.x / 0.5) * 0.5;
       const snappedZ = Math.round(target.z / 0.5) * 0.5;
 
-      // Update mesh position visually — no React state update yet (prevents jitter)
       const mesh = meshMapRef.current.get(dragRoomIdRef.current!);
       if (mesh) mesh.position.set(snappedX, mesh.position.y, snappedZ);
 
-      // Store final position to commit on pointer-up
-      pendingMoveRef.current = {
-        id: dragRoomIdRef.current!,
-        x: parseFloat((snappedX - room.w / 2).toFixed(1)),
-        y: parseFloat((snappedZ - room.h / 2).toFixed(1)),
-      };
+      // Call onMoveRoom every move so React state stays in sync with visual position.
+      // Geometry rebuild is suppressed by roomDimsRef (position-only change = no rebuild).
+      onMoveRoomRef.current(
+        dragRoomIdRef.current!,
+        parseFloat((snappedX - room.w / 2).toFixed(1)),
+        parseFloat((snappedZ - room.h / 2).toFixed(1)),
+      );
     };
 
     const onPointerUp = () => {
-      // Commit drag position to React state exactly once per drag
-      if (pendingMoveRef.current && isDraggingRef.current) {
-        const { id, x, y } = pendingMoveRef.current;
-        onMoveRoomRef.current(id, x, y);
-        pendingMoveRef.current = null;
-      }
       if (moveModeRef.current === "active") {
         moveModeRef.current = "pending";
       }
