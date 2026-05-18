@@ -10,21 +10,10 @@ const ROOM_COLORS = [
   0xff922b, 0x20c997, 0xf06595, 0x74c0fc, 0xa9e34b,
 ];
 
-const WALL_COLOR = 0xf0eeea;
-
-interface ThreeViewerProps {
-  rooms: Room[];
-  selectedRoomId: string | null;
-  onSelectRoom: (id: string | null) => void;
-  onMoveRoom: (id: string, x: number, y: number) => void;
-  readonly?: boolean;
-}
-
-// Open-top box (toy-box style): floor + 4 walls, no ceiling.
-// group 0 = floor (room color), group 1 = walls (wall color)
+// Open-top box: floor (group 0) + 4 walls (group 1), with UV coords for texture
 function createOpenBoxGeo(w: number, wallHeight: number, h: number): THREE.BufferGeometry {
   const hw = w / 2, hh = wallHeight / 2, hd = h / 2;
-  const pos: number[] = [], nor: number[] = [], idx: number[] = [];
+  const pos: number[] = [], nor: number[] = [], uvs: number[] = [], idx: number[] = [];
 
   const addQuad = (
     v0: [number, number, number], v1: [number, number, number],
@@ -34,27 +23,64 @@ function createOpenBoxGeo(w: number, wallHeight: number, h: number): THREE.Buffe
     const b = pos.length / 3;
     pos.push(...v0, ...v1, ...v2, ...v3);
     for (let i = 0; i < 4; i++) nor.push(nx, ny, nz);
+    uvs.push(0, 0,  1, 0,  1, 1,  0, 1);
     idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
   };
 
-  // Floor: normal +Y (visible from above)
+  // Floor: normal +Y
   addQuad([-hw, -hh, hd], [hw, -hh, hd], [hw, -hh, -hd], [-hw, -hh, -hd], 0, 1, 0);
-  // Wall +X: normal +X
+  // Wall +X
   addQuad([hw, -hh, hd], [hw, -hh, -hd], [hw, hh, -hd], [hw, hh, hd], 1, 0, 0);
-  // Wall -X: normal -X
+  // Wall -X
   addQuad([-hw, -hh, -hd], [-hw, -hh, hd], [-hw, hh, hd], [-hw, hh, -hd], -1, 0, 0);
-  // Wall +Z: normal +Z
+  // Wall +Z
   addQuad([-hw, -hh, hd], [hw, -hh, hd], [hw, hh, hd], [-hw, hh, hd], 0, 0, 1);
-  // Wall -Z: normal -Z
+  // Wall -Z
   addQuad([hw, -hh, -hd], [-hw, -hh, -hd], [-hw, hh, -hd], [hw, hh, -hd], 0, 0, -1);
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pos), 3));
   geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(nor), 3));
+  geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(uvs), 2));
   geo.setIndex(idx);
   geo.addGroup(0, 6, 0);   // floor
   geo.addGroup(6, 24, 1);  // 4 walls
   return geo;
+}
+
+// Pick white or black text based on perceived luminance of the background color
+function pickTextColor(hex: number): string {
+  const r = (hex >> 16) & 0xff;
+  const g = (hex >> 8) & 0xff;
+  const b = hex & 0xff;
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.55 ? "#000000" : "#ffffff";
+}
+
+function createFloorTexture(name: string, colorHex: number): THREE.CanvasTexture {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+
+  ctx.fillStyle = `#${colorHex.toString(16).padStart(6, "0")}`;
+  ctx.fillRect(0, 0, size, size);
+
+  ctx.fillStyle = pickTextColor(colorHex);
+  ctx.font = "bold 24px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(name, size / 2, size / 2);
+
+  return new THREE.CanvasTexture(canvas);
+}
+
+interface ThreeViewerProps {
+  rooms: Room[];
+  selectedRoomId: string | null;
+  onSelectRoom: (id: string | null) => void;
+  onMoveRoom: (id: string, x: number, y: number) => void;
+  readonly?: boolean;
 }
 
 export default function ThreeViewer({
@@ -77,10 +103,16 @@ export default function ThreeViewer({
   const dragRoomIdRef = useRef<string | null>(null);
   // 'pending' = selected, showing ✓/✗ buttons; 'active' = drag enabled
   const moveModeRef = useRef<"pending" | "active" | null>(null);
+  // Final position to commit on pointer-up (avoids mid-drag React re-renders)
+  const pendingMoveRef = useRef<{ id: string; x: number; y: number } | null>(null);
   const dragPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
   const raycasterRef = useRef(new THREE.Raycaster());
   const mouseRef = useRef(new THREE.Vector2());
   const pointerDownPosRef = useRef({ x: 0, y: 0 });
+
+  // Cached room metadata — skip geometry/texture rebuild when unchanged
+  const roomDimsRef = useRef<Map<string, { w: number; h: number; wh: number }>>(new Map());
+  const roomNamesRef = useRef<Map<string, string>>(new Map());
 
   const roomsRef = useRef<Room[]>(rooms);
   const onSelectRoomRef = useRef(onSelectRoom);
@@ -94,6 +126,7 @@ export default function ThreeViewer({
     if (!selectedRoomId) {
       moveModeRef.current = null;
       dragRoomIdRef.current = null;
+      pendingMoveRef.current = null;
       if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
     }
   }, [selectedRoomId]);
@@ -108,11 +141,16 @@ export default function ThreeViewer({
 
   const buildRoom = useCallback((room: Room, colorIdx: number) => {
     const geo = createOpenBoxGeo(room.w, room.wallHeight, room.h);
-    const floorMat = new THREE.MeshLambertMaterial({
-      color: ROOM_COLORS[colorIdx % ROOM_COLORS.length],
+
+    const floorMat = new THREE.MeshStandardMaterial({
+      map: createFloorTexture(room.name, ROOM_COLORS[colorIdx % ROOM_COLORS.length]),
+      roughness: 0.7,
+      metalness: 0,
     });
-    const wallMat = new THREE.MeshLambertMaterial({
-      color: WALL_COLOR,
+    const wallMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      roughness: 0.3,
+      metalness: 0,
       side: THREE.DoubleSide,
     });
 
@@ -129,6 +167,9 @@ export default function ThreeViewer({
       new THREE.LineBasicMaterial({ color: 0xaaaaaa }),
     );
     mesh.add(lineSegs);
+
+    roomDimsRef.current.set(room.id, { w: room.w, h: room.h, wh: room.wallHeight });
+    roomNamesRef.current.set(room.id, room.name);
 
     return { mesh, lineSegs };
   }, []);
@@ -197,7 +238,7 @@ export default function ThreeViewer({
       animFrameRef.current = requestAnimationFrame(animate);
       controls.update();
 
-      // Keep action button positioned above selected room
+      // Keep action button tracked above selected room
       if (actionBtn && moveModeRef.current === "pending") {
         const roomId = dragRoomIdRef.current;
         if (roomId && cameraRef.current && mountRef.current) {
@@ -210,10 +251,8 @@ export default function ThreeViewer({
             );
             worldPos.project(cameraRef.current);
             const rect = mountRef.current.getBoundingClientRect();
-            const sx = ((worldPos.x + 1) / 2) * rect.width;
-            const sy = ((-worldPos.y + 1) / 2) * rect.height;
-            actionBtn.style.left = `${sx}px`;
-            actionBtn.style.top = `${sy}px`;
+            actionBtn.style.left = `${((worldPos.x + 1) / 2) * rect.width}px`;
+            actionBtn.style.top = `${((-worldPos.y + 1) / 2) * rect.height}px`;
             actionBtn.style.display = "flex";
           }
         } else {
@@ -244,33 +283,51 @@ export default function ThreeViewer({
     };
   }, []);
 
-  // Sync rooms to scene
+  // Sync rooms to scene — avoids geometry rebuild when only position changed
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
 
     const stale = new Set(meshMapRef.current.keys());
+    const draggingId = dragRoomIdRef.current;
 
     rooms.forEach((room, idx) => {
       stale.delete(room.id);
       const existing = meshMapRef.current.get(room.id);
 
       if (existing) {
-        existing.position.set(room.x + room.w / 2, room.wallHeight / 2, room.y + room.h / 2);
-
-        existing.geometry.dispose();
-        existing.geometry = createOpenBoxGeo(room.w, room.wallHeight, room.h);
-
-        const edgeSeg = edgesMapRef.current.get(room.id);
-        if (edgeSeg) {
-          edgeSeg.geometry.dispose();
-          edgeSeg.geometry = new THREE.EdgesGeometry(existing.geometry);
+        // Don't override position for the room being dragged (mesh is ahead of React state)
+        if (room.id !== draggingId) {
+          existing.position.set(room.x + room.w / 2, room.wallHeight / 2, room.y + room.h / 2);
         }
 
-        // Selection highlight on wall material (index 1)
-        const mats = existing.material as THREE.MeshLambertMaterial[];
-        const isSelected = room.id === selectedRoomId;
-        mats[1].emissive.set(isSelected ? 0x221100 : 0x000000);
+        // Rebuild geometry only when dimensions actually changed
+        const prev = roomDimsRef.current.get(room.id);
+        const dimsChanged = !prev || prev.w !== room.w || prev.h !== room.h || prev.wh !== room.wallHeight;
+        if (dimsChanged) {
+          existing.geometry.dispose();
+          existing.geometry = createOpenBoxGeo(room.w, room.wallHeight, room.h);
+          const edgeSeg = edgesMapRef.current.get(room.id);
+          if (edgeSeg) {
+            edgeSeg.geometry.dispose();
+            edgeSeg.geometry = new THREE.EdgesGeometry(existing.geometry);
+          }
+          roomDimsRef.current.set(room.id, { w: room.w, h: room.h, wh: room.wallHeight });
+        }
+
+        // Rebuild floor texture when name or dims changed
+        const nameChanged = roomNamesRef.current.get(room.id) !== room.name;
+        if (nameChanged || dimsChanged) {
+          const mats = existing.material as THREE.MeshStandardMaterial[];
+          if (mats[0].map) mats[0].map.dispose();
+          mats[0].map = createFloorTexture(room.name, ROOM_COLORS[existing.userData.colorIdx % ROOM_COLORS.length]);
+          mats[0].needsUpdate = true;
+          roomNamesRef.current.set(room.id, room.name);
+        }
+
+        // Selection highlight on wall material
+        const mats = existing.material as THREE.MeshStandardMaterial[];
+        mats[1].emissive.set(room.id === selectedRoomId ? 0x221100 : 0x000000);
       } else {
         const { mesh, lineSegs } = buildRoom(room, idx);
         scene.add(mesh);
@@ -287,9 +344,15 @@ export default function ThreeViewer({
         const mats = Array.isArray(mesh.material)
           ? (mesh.material as THREE.Material[])
           : [mesh.material as THREE.Material];
-        mats.forEach((m) => m.dispose());
+        mats.forEach((m) => {
+          const sm = m as THREE.MeshStandardMaterial;
+          if (sm.map) sm.map.dispose();
+          m.dispose();
+        });
         meshMapRef.current.delete(id);
         edgesMapRef.current.delete(id);
+        roomDimsRef.current.delete(id);
+        roomNamesRef.current.delete(id);
       }
     });
   }, [rooms, selectedRoomId, buildRoom]);
@@ -304,6 +367,7 @@ export default function ThreeViewer({
   const handleCancel = useCallback(() => {
     moveModeRef.current = null;
     dragRoomIdRef.current = null;
+    pendingMoveRef.current = null;
     if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
     onSelectRoomRef.current(null);
   }, []);
@@ -319,14 +383,13 @@ export default function ThreeViewer({
       isDraggingRef.current = false;
 
       if (moveModeRef.current === "active") {
-        // Prepare for drag without changing selection
+        // Ready to drag — disable orbit so camera doesn't move
         if (dragRoomIdRef.current && controlsRef.current) {
           controlsRef.current.enabled = false;
         }
         return;
       }
 
-      // Normal selection flow
       const pos = getCanvasPos(clientX, clientY);
       mouseRef.current.set(pos.x, pos.y);
       raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current!);
@@ -347,6 +410,7 @@ export default function ThreeViewer({
         onSelectRoomRef.current(null);
         dragRoomIdRef.current = null;
         moveModeRef.current = null;
+        pendingMoveRef.current = null;
         if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
       }
     };
@@ -374,21 +438,26 @@ export default function ThreeViewer({
       const snappedX = Math.round(target.x / 0.5) * 0.5;
       const snappedZ = Math.round(target.z / 0.5) * 0.5;
 
+      // Update mesh position visually — no React state update yet (prevents jitter)
       const mesh = meshMapRef.current.get(dragRoomIdRef.current!);
-      if (mesh) {
-        mesh.position.set(snappedX, mesh.position.y, snappedZ);
-      }
+      if (mesh) mesh.position.set(snappedX, mesh.position.y, snappedZ);
 
-      onMoveRoomRef.current(
-        dragRoomIdRef.current!,
-        parseFloat((snappedX - room.w / 2).toFixed(1)),
-        parseFloat((snappedZ - room.h / 2).toFixed(1)),
-      );
+      // Store final position to commit on pointer-up
+      pendingMoveRef.current = {
+        id: dragRoomIdRef.current!,
+        x: parseFloat((snappedX - room.w / 2).toFixed(1)),
+        y: parseFloat((snappedZ - room.h / 2).toFixed(1)),
+      };
     };
 
     const onPointerUp = () => {
+      // Commit drag position to React state exactly once per drag
+      if (pendingMoveRef.current && isDraggingRef.current) {
+        const { id, x, y } = pendingMoveRef.current;
+        onMoveRoomRef.current(id, x, y);
+        pendingMoveRef.current = null;
+      }
       if (moveModeRef.current === "active") {
-        // Return to pending so buttons reappear
         moveModeRef.current = "pending";
       }
       isDraggingRef.current = false;
