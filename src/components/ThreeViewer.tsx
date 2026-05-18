@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Room } from "@/lib/types";
@@ -10,8 +10,7 @@ const ROOM_COLORS = [
   0xff922b, 0x20c997, 0xf06595, 0x74c0fc, 0xa9e34b,
 ];
 
-const WALL_COLOR = 0xf5f0e8;  // cream white
-const CEIL_COLOR = 0xfafafa;  // near white
+const WALL_COLOR = 0xf0eeea;
 
 interface ThreeViewerProps {
   rooms: Room[];
@@ -19,6 +18,43 @@ interface ThreeViewerProps {
   onSelectRoom: (id: string | null) => void;
   onMoveRoom: (id: string, x: number, y: number) => void;
   readonly?: boolean;
+}
+
+// Open-top box (toy-box style): floor + 4 walls, no ceiling.
+// group 0 = floor (room color), group 1 = walls (wall color)
+function createOpenBoxGeo(w: number, wallHeight: number, h: number): THREE.BufferGeometry {
+  const hw = w / 2, hh = wallHeight / 2, hd = h / 2;
+  const pos: number[] = [], nor: number[] = [], idx: number[] = [];
+
+  const addQuad = (
+    v0: [number, number, number], v1: [number, number, number],
+    v2: [number, number, number], v3: [number, number, number],
+    nx: number, ny: number, nz: number,
+  ) => {
+    const b = pos.length / 3;
+    pos.push(...v0, ...v1, ...v2, ...v3);
+    for (let i = 0; i < 4; i++) nor.push(nx, ny, nz);
+    idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+  };
+
+  // Floor: normal +Y (visible from above)
+  addQuad([-hw, -hh, hd], [hw, -hh, hd], [hw, -hh, -hd], [-hw, -hh, -hd], 0, 1, 0);
+  // Wall +X: normal +X
+  addQuad([hw, -hh, hd], [hw, -hh, -hd], [hw, hh, -hd], [hw, hh, hd], 1, 0, 0);
+  // Wall -X: normal -X
+  addQuad([-hw, -hh, -hd], [-hw, -hh, hd], [-hw, hh, hd], [-hw, hh, -hd], -1, 0, 0);
+  // Wall +Z: normal +Z
+  addQuad([-hw, -hh, hd], [hw, -hh, hd], [hw, hh, hd], [-hw, hh, hd], 0, 0, 1);
+  // Wall -Z: normal -Z
+  addQuad([hw, -hh, -hd], [-hw, -hh, -hd], [-hw, hh, -hd], [hw, hh, -hd], 0, 0, -1);
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(nor), 3));
+  geo.setIndex(idx);
+  geo.addGroup(0, 6, 0);   // floor
+  geo.addGroup(6, 24, 1);  // 4 walls
+  return geo;
 }
 
 export default function ThreeViewer({
@@ -29,7 +65,7 @@ export default function ThreeViewer({
   readonly = false,
 }: ThreeViewerProps) {
   const mountRef = useRef<HTMLDivElement>(null);
-  const [sceneReady, setSceneReady] = useState(false);
+  const actionBtnRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -39,18 +75,28 @@ export default function ThreeViewer({
   const animFrameRef = useRef<number>(0);
   const isDraggingRef = useRef(false);
   const dragRoomIdRef = useRef<string | null>(null);
+  // 'pending' = selected, showing ✓/✗ buttons; 'active' = drag enabled
+  const moveModeRef = useRef<"pending" | "active" | null>(null);
   const dragPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
   const raycasterRef = useRef(new THREE.Raycaster());
   const mouseRef = useRef(new THREE.Vector2());
   const pointerDownPosRef = useRef({ x: 0, y: 0 });
 
-  // Keep refs current so drag effect doesn't need rooms/callbacks in deps
   const roomsRef = useRef<Room[]>(rooms);
   const onSelectRoomRef = useRef(onSelectRoom);
   const onMoveRoomRef = useRef(onMoveRoom);
   useEffect(() => { roomsRef.current = rooms; }, [rooms]);
   useEffect(() => { onSelectRoomRef.current = onSelectRoom; }, [onSelectRoom]);
   useEffect(() => { onMoveRoomRef.current = onMoveRoom; }, [onMoveRoom]);
+
+  // Reset move mode when selection is cleared externally
+  useEffect(() => {
+    if (!selectedRoomId) {
+      moveModeRef.current = null;
+      dragRoomIdRef.current = null;
+      if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
+    }
+  }, [selectedRoomId]);
 
   const getCanvasPos = (clientX: number, clientY: number) => {
     const rect = mountRef.current!.getBoundingClientRect();
@@ -60,15 +106,17 @@ export default function ThreeViewer({
     };
   };
 
-  // BoxGeometry face groups: +X(0), -X(1), +Y/ceil(2), -Y/floor(3), +Z(4), -Z(5)
   const buildRoom = useCallback((room: Room, colorIdx: number) => {
-    const geo = new THREE.BoxGeometry(room.w, room.wallHeight, room.h);
-    const wallMat = () => new THREE.MeshLambertMaterial({ color: WALL_COLOR });
-    const ceilMat = new THREE.MeshLambertMaterial({ color: CEIL_COLOR });
-    const floorMat = new THREE.MeshLambertMaterial({ color: ROOM_COLORS[colorIdx % ROOM_COLORS.length] });
-    const materials = [wallMat(), wallMat(), ceilMat, floorMat, wallMat(), wallMat()];
+    const geo = createOpenBoxGeo(room.w, room.wallHeight, room.h);
+    const floorMat = new THREE.MeshLambertMaterial({
+      color: ROOM_COLORS[colorIdx % ROOM_COLORS.length],
+    });
+    const wallMat = new THREE.MeshLambertMaterial({
+      color: WALL_COLOR,
+      side: THREE.DoubleSide,
+    });
 
-    const mesh = new THREE.Mesh(geo, materials);
+    const mesh = new THREE.Mesh(geo, [floorMat, wallMat]);
     mesh.position.set(room.x + room.w / 2, room.wallHeight / 2, room.y + room.h / 2);
     mesh.userData.roomId = room.id;
     mesh.userData.colorIdx = colorIdx;
@@ -78,7 +126,7 @@ export default function ThreeViewer({
     const edges = new THREE.EdgesGeometry(geo);
     const lineSegs = new THREE.LineSegments(
       edges,
-      new THREE.LineBasicMaterial({ color: 0xaaaaaa })
+      new THREE.LineBasicMaterial({ color: 0xaaaaaa }),
     );
     mesh.add(lineSegs);
 
@@ -108,13 +156,9 @@ export default function ThreeViewer({
     el.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // Ambient: soft sky light
     scene.add(new THREE.AmbientLight(0xc8d8e8, 0.7));
-
-    // Hemisphere light for sky/ground gradient
     scene.add(new THREE.HemisphereLight(0xddeeff, 0xc8b89a, 0.4));
 
-    // Main sun light with realistic shadows
     const dirLight = new THREE.DirectionalLight(0xfffaf0, 1.1);
     dirLight.position.set(15, 28, 12);
     dirLight.castShadow = true;
@@ -129,17 +173,15 @@ export default function ThreeViewer({
     dirLight.shadow.bias = -0.001;
     scene.add(dirLight);
 
-    // Ground plane that receives shadows
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(100, 100),
-      new THREE.MeshLambertMaterial({ color: 0xc8c0a8 })
+      new THREE.MeshLambertMaterial({ color: 0xc8c0a8 }),
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = -0.01;
     ground.receiveShadow = true;
     scene.add(ground);
 
-    // Subtle grid on top of ground
     const grid = new THREE.GridHelper(60, 60, 0xb0a890, 0xb8b0a0);
     grid.position.y = 0.001;
     scene.add(grid);
@@ -149,11 +191,36 @@ export default function ThreeViewer({
     controls.dampingFactor = 0.05;
     controlsRef.current = controls;
 
-    setSceneReady(true);
+    const actionBtn = actionBtnRef.current;
 
     const animate = () => {
       animFrameRef.current = requestAnimationFrame(animate);
       controls.update();
+
+      // Keep action button positioned above selected room
+      if (actionBtn && moveModeRef.current === "pending") {
+        const roomId = dragRoomIdRef.current;
+        if (roomId && cameraRef.current && mountRef.current) {
+          const mesh = meshMapRef.current.get(roomId);
+          if (mesh) {
+            const worldPos = new THREE.Vector3(
+              mesh.position.x,
+              mesh.position.y * 2 + 0.4,
+              mesh.position.z,
+            );
+            worldPos.project(cameraRef.current);
+            const rect = mountRef.current.getBoundingClientRect();
+            const sx = ((worldPos.x + 1) / 2) * rect.width;
+            const sy = ((-worldPos.y + 1) / 2) * rect.height;
+            actionBtn.style.left = `${sx}px`;
+            actionBtn.style.top = `${sy}px`;
+            actionBtn.style.display = "flex";
+          }
+        } else {
+          actionBtn.style.display = "none";
+        }
+      }
+
       renderer.render(scene, camera);
     };
     animate();
@@ -174,11 +241,10 @@ export default function ThreeViewer({
       sceneRef.current = null;
       meshMapRef.current.clear();
       edgesMapRef.current.clear();
-      setSceneReady(false);
     };
   }, []);
 
-  // Sync rooms to scene + rebuild roof
+  // Sync rooms to scene
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
@@ -190,26 +256,21 @@ export default function ThreeViewer({
       const existing = meshMapRef.current.get(room.id);
 
       if (existing) {
-        // Update position
         existing.position.set(room.x + room.w / 2, room.wallHeight / 2, room.y + room.h / 2);
 
-        // Rebuild geometry for dimension changes
         existing.geometry.dispose();
-        existing.geometry = new THREE.BoxGeometry(room.w, room.wallHeight, room.h);
+        existing.geometry = createOpenBoxGeo(room.w, room.wallHeight, room.h);
 
-        // Rebuild edge geometry
         const edgeSeg = edgesMapRef.current.get(room.id);
         if (edgeSeg) {
           edgeSeg.geometry.dispose();
           edgeSeg.geometry = new THREE.EdgesGeometry(existing.geometry);
         }
 
-        // Selection highlight on wall materials (indices 0,1,4,5)
+        // Selection highlight on wall material (index 1)
         const mats = existing.material as THREE.MeshLambertMaterial[];
         const isSelected = room.id === selectedRoomId;
-        for (const i of [0, 1, 4, 5]) {
-          mats[i].emissive.set(isSelected ? 0x221100 : 0x000000);
-        }
+        mats[1].emissive.set(isSelected ? 0x221100 : 0x000000);
       } else {
         const { mesh, lineSegs } = buildRoom(room, idx);
         scene.add(mesh);
@@ -218,7 +279,6 @@ export default function ThreeViewer({
       }
     });
 
-    // Remove deleted rooms
     stale.forEach((id) => {
       const mesh = meshMapRef.current.get(id);
       if (mesh) {
@@ -232,10 +292,23 @@ export default function ThreeViewer({
         edgesMapRef.current.delete(id);
       }
     });
+  }, [rooms, selectedRoomId, buildRoom]);
 
-  }, [rooms, selectedRoomId, buildRoom, sceneReady]);
+  // ✓ button: enter active move mode
+  const handleConfirm = useCallback(() => {
+    moveModeRef.current = "active";
+    if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
+  }, []);
 
-  // Mouse/touch event handlers — registered once, use refs for live data
+  // ✗ button: cancel selection
+  const handleCancel = useCallback(() => {
+    moveModeRef.current = null;
+    dragRoomIdRef.current = null;
+    if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
+    onSelectRoomRef.current(null);
+  }, []);
+
+  // Mouse/touch event handlers
   useEffect(() => {
     if (readonly) return;
     const el = mountRef.current;
@@ -245,6 +318,15 @@ export default function ThreeViewer({
       pointerDownPosRef.current = { x: clientX, y: clientY };
       isDraggingRef.current = false;
 
+      if (moveModeRef.current === "active") {
+        // Prepare for drag without changing selection
+        if (dragRoomIdRef.current && controlsRef.current) {
+          controlsRef.current.enabled = false;
+        }
+        return;
+      }
+
+      // Normal selection flow
       const pos = getCanvasPos(clientX, clientY);
       mouseRef.current.set(pos.x, pos.y);
       raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current!);
@@ -259,16 +341,18 @@ export default function ThreeViewer({
         if (roomId) {
           onSelectRoomRef.current(roomId);
           dragRoomIdRef.current = roomId;
-          if (controlsRef.current) controlsRef.current.enabled = false;
+          moveModeRef.current = "pending";
         }
       } else {
         onSelectRoomRef.current(null);
         dragRoomIdRef.current = null;
+        moveModeRef.current = null;
+        if (actionBtnRef.current) actionBtnRef.current.style.display = "none";
       }
     };
 
     const onPointerMove = (clientX: number, clientY: number) => {
-      if (!dragRoomIdRef.current) return;
+      if (moveModeRef.current !== "active" || !dragRoomIdRef.current) return;
 
       const dx = Math.abs(clientX - pointerDownPosRef.current.x);
       const dy = Math.abs(clientY - pointerDownPosRef.current.y);
@@ -286,21 +370,28 @@ export default function ThreeViewer({
       const room = roomsRef.current.find((r) => r.id === dragRoomIdRef.current);
       if (!room) return;
 
+      // Snap to 0.5m grid
+      const snappedX = Math.round(target.x / 0.5) * 0.5;
+      const snappedZ = Math.round(target.z / 0.5) * 0.5;
+
       const mesh = meshMapRef.current.get(dragRoomIdRef.current!);
       if (mesh) {
-        mesh.position.set(target.x, mesh.position.y, target.z);
+        mesh.position.set(snappedX, mesh.position.y, snappedZ);
       }
 
       onMoveRoomRef.current(
         dragRoomIdRef.current!,
-        parseFloat((target.x - room.w / 2).toFixed(1)),
-        parseFloat((target.z - room.h / 2).toFixed(1))
+        parseFloat((snappedX - room.w / 2).toFixed(1)),
+        parseFloat((snappedZ - room.h / 2).toFixed(1)),
       );
     };
 
     const onPointerUp = () => {
+      if (moveModeRef.current === "active") {
+        // Return to pending so buttons reappear
+        moveModeRef.current = "pending";
+      }
       isDraggingRef.current = false;
-      dragRoomIdRef.current = null;
       if (controlsRef.current) controlsRef.current.enabled = true;
     };
 
@@ -333,5 +424,60 @@ export default function ThreeViewer({
     };
   }, [readonly]);
 
-  return <div ref={mountRef} className="w-full h-full" />;
+  return (
+    <div ref={mountRef} className="w-full h-full" style={{ position: "relative" }}>
+      {!readonly && (
+        <div
+          ref={actionBtnRef}
+          style={{
+            position: "absolute",
+            display: "none",
+            transform: "translate(-50%, -100%)",
+            gap: "6px",
+            pointerEvents: "auto",
+            zIndex: 10,
+          }}
+        >
+          <button
+            onClick={handleConfirm}
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: "50%",
+              border: "none",
+              background: "#22c55e",
+              color: "#fff",
+              fontSize: 18,
+              cursor: "pointer",
+              boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            ✓
+          </button>
+          <button
+            onClick={handleCancel}
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: "50%",
+              border: "none",
+              background: "#ef4444",
+              color: "#fff",
+              fontSize: 18,
+              cursor: "pointer",
+              boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            ✗
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
