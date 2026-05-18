@@ -41,6 +41,14 @@ export default function ThreeViewer({
   const mouseRef = useRef(new THREE.Vector2());
   const pointerDownPosRef = useRef({ x: 0, y: 0 });
 
+  // Keep refs current so drag effect doesn't need rooms/callbacks in its deps
+  const roomsRef = useRef<Room[]>(rooms);
+  const onSelectRoomRef = useRef(onSelectRoom);
+  const onMoveRoomRef = useRef(onMoveRoom);
+  useEffect(() => { roomsRef.current = rooms; }, [rooms]);
+  useEffect(() => { onSelectRoomRef.current = onSelectRoom; }, [onSelectRoom]);
+  useEffect(() => { onMoveRoomRef.current = onMoveRoom; }, [onMoveRoom]);
+
   const getCanvasPos = (clientX: number, clientY: number) => {
     const rect = mountRef.current!.getBoundingClientRect();
     return {
@@ -201,7 +209,7 @@ export default function ThreeViewer({
     });
   }, [rooms, selectedRoomId, buildRoom, sceneReady]);
 
-  // Mouse/touch event handlers for drag
+  // Mouse/touch event handlers for drag — registered once, use refs for live data
   useEffect(() => {
     if (readonly) return;
     const el = mountRef.current;
@@ -209,20 +217,28 @@ export default function ThreeViewer({
 
     const onPointerDown = (clientX: number, clientY: number) => {
       pointerDownPosRef.current = { x: clientX, y: clientY };
+      isDraggingRef.current = false;
+
       const pos = getCanvasPos(clientX, clientY);
       mouseRef.current.set(pos.x, pos.y);
-
       raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current!);
+
       const meshes = Array.from(meshMapRef.current.values());
-      const hits = raycasterRef.current.intersectObjects(meshes);
+      const hits = raycasterRef.current.intersectObjects(meshes, false);
 
       if (hits.length > 0) {
-        const roomId = hits[0].object.userData.roomId as string;
-        onSelectRoom(roomId);
-        isDraggingRef.current = false;
-        dragRoomIdRef.current = roomId;
+        // Walk up to the mesh that has roomId (skip edge LineSegments children)
+        let obj: THREE.Object3D = hits[0].object;
+        while (obj && !obj.userData.roomId && obj.parent) obj = obj.parent;
+        const roomId = obj.userData.roomId as string | undefined;
+        if (roomId) {
+          onSelectRoomRef.current(roomId);
+          dragRoomIdRef.current = roomId;
+          // Disable OrbitControls immediately so it doesn't compete with drag
+          if (controlsRef.current) controlsRef.current.enabled = false;
+        }
       } else {
-        onSelectRoom(null);
+        onSelectRoomRef.current(null);
         dragRoomIdRef.current = null;
       }
     };
@@ -232,27 +248,27 @@ export default function ThreeViewer({
 
       const dx = Math.abs(clientX - pointerDownPosRef.current.x);
       const dy = Math.abs(clientY - pointerDownPosRef.current.y);
-      if (!isDraggingRef.current && dx < 5 && dy < 5) return;
+      if (dx < 3 && dy < 3) return;
 
       isDraggingRef.current = true;
-      if (controlsRef.current) controlsRef.current.enabled = false;
 
       const pos = getCanvasPos(clientX, clientY);
       mouseRef.current.set(pos.x, pos.y);
       raycasterRef.current.setFromCamera(mouseRef.current, cameraRef.current!);
 
       const target = new THREE.Vector3();
-      raycasterRef.current.ray.intersectPlane(dragPlaneRef.current, target);
+      if (!raycasterRef.current.ray.intersectPlane(dragPlaneRef.current, target)) return;
 
-      const room = rooms.find((r) => r.id === dragRoomIdRef.current);
+      const room = roomsRef.current.find((r) => r.id === dragRoomIdRef.current);
       if (!room) return;
 
+      // Move mesh directly for smooth visual feedback
       const mesh = meshMapRef.current.get(dragRoomIdRef.current!);
       if (mesh) {
         mesh.position.set(target.x, mesh.position.y, target.z);
       }
 
-      onMoveRoom(
+      onMoveRoomRef.current(
         dragRoomIdRef.current!,
         parseFloat((target.x - room.w / 2).toFixed(1)),
         parseFloat((target.z - room.h / 2).toFixed(1))
@@ -279,22 +295,23 @@ export default function ThreeViewer({
     };
     const onTouchEnd = () => onPointerUp();
 
+    // mousedown on canvas, mousemove/mouseup on window to catch releases outside canvas
     el.addEventListener("mousedown", onMouseDown);
-    el.addEventListener("mousemove", onMouseMove);
-    el.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
     el.addEventListener("touchstart", onTouchStart, { passive: true });
     el.addEventListener("touchmove", onTouchMove, { passive: true });
     el.addEventListener("touchend", onTouchEnd);
 
     return () => {
       el.removeEventListener("mousedown", onMouseDown);
-      el.removeEventListener("mousemove", onMouseMove);
-      el.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
       el.removeEventListener("touchstart", onTouchStart);
       el.removeEventListener("touchmove", onTouchMove);
       el.removeEventListener("touchend", onTouchEnd);
     };
-  }, [readonly, rooms, onSelectRoom, onMoveRoom]);
+  }, [readonly]);
 
   return <div ref={mountRef} className="w-full h-full" />;
 }
