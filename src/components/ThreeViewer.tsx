@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Room } from "@/lib/types";
@@ -26,6 +26,7 @@ export default function ThreeViewer({
   readonly = false,
 }: ThreeViewerProps) {
   const mountRef = useRef<HTMLDivElement>(null);
+  const [sceneReady, setSceneReady] = useState(false);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -113,6 +114,8 @@ export default function ThreeViewer({
     controls.dampingFactor = 0.05;
     controlsRef.current = controls;
 
+    setSceneReady(true);
+
     const animate = () => {
       animFrameRef.current = requestAnimationFrame(animate);
       controls.update();
@@ -133,6 +136,10 @@ export default function ThreeViewer({
       window.removeEventListener("resize", onResize);
       renderer.dispose();
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
+      sceneRef.current = null;
+      meshMapRef.current.clear();
+      edgesMapRef.current.clear();
+      setSceneReady(false);
     };
   }, []);
 
@@ -192,7 +199,7 @@ export default function ThreeViewer({
         edgesMapRef.current.delete(id);
       }
     });
-  }, [rooms, selectedRoomId, buildRoom]);
+  }, [rooms, selectedRoomId, buildRoom, sceneReady]);
 
   // Mouse/touch event handlers for drag
   useEffect(() => {
