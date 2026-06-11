@@ -10,7 +10,7 @@ const ROOM_COLORS = [
   0xff922b, 0x20c997, 0xf06595, 0x74c0fc, 0xa9e34b,
 ];
 
-const FULL_FLOOR_UV = [0, 0, 1, 0, 1, 1, 0, 1];
+const DEFAULT_UV = [0, 0, 1, 0, 1, 1, 0, 1];
 
 interface BBox {
   minX: number;
@@ -19,8 +19,15 @@ interface BBox {
   maxZ: number;
 }
 
-// Bounding box (in meters) covering all rooms — used as the proxy
-// "image area" for cropping the floor plan texture per room.
+interface RoomTextureEntry {
+  canvas: HTMLCanvasElement;
+  texture: THREE.CanvasTexture;
+  key: string;
+}
+
+// Bounding box (in meters) covering all rooms at initial layout — frozen
+// once computed so it stays a stable reference frame for texture cropping
+// even as individual rooms are moved/resized afterward.
 function computeRoomsBBox(rooms: Room[]): BBox {
   if (rooms.length === 0) return { minX: 0, minZ: 0, maxX: 1, maxZ: 1 };
   let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
@@ -35,46 +42,52 @@ function computeRoomsBBox(rooms: Room[]): BBox {
   return { minX, minZ, maxX, maxZ };
 }
 
-function bboxEquals(a: BBox | null, b: BBox): boolean {
-  if (!a) return false;
-  const eps = 1e-6;
-  return (
-    Math.abs(a.minX - b.minX) < eps &&
-    Math.abs(a.minZ - b.minZ) < eps &&
-    Math.abs(a.maxX - b.maxX) < eps &&
-    Math.abs(a.maxZ - b.maxZ) < eps
-  );
-}
+// Crops the source floor-plan image to the pixel rectangle covered by this
+// room (relative to the frozen layout bbox), reusing the room's own canvas
+// and texture instance when only the source rectangle changes.
+function getRoomFloorTexture(
+  room: Room,
+  image: HTMLImageElement,
+  bbox: BBox,
+  cache: Map<string, RoomTextureEntry>,
+): THREE.CanvasTexture {
+  const bboxW = bbox.maxX - bbox.minX;
+  const bboxD = bbox.maxZ - bbox.minZ;
+  const imageW = image.naturalWidth;
+  const imageH = image.naturalHeight;
 
-// Maps a room's footprint within the layout bbox to a UV rectangle
-// on the shared floor-plan texture.
-function computeFloorUV(room: Room, bbox: BBox): number[] {
-  const w = bbox.maxX - bbox.minX;
-  const d = bbox.maxZ - bbox.minZ;
-  const uLeft = (room.x - bbox.minX) / w;
-  const uRight = (room.x + room.w - bbox.minX) / w;
-  const vBottom = 1 - (room.y + room.h - bbox.minZ) / d;
-  const vTop = 1 - (room.y - bbox.minZ) / d;
-  return [uLeft, vBottom, uRight, vBottom, uRight, vTop, uLeft, vTop];
-}
+  const sx = Math.max(0, Math.min(imageW, ((room.x - bbox.minX) / bboxW) * imageW));
+  const sy = Math.max(0, Math.min(imageH, ((room.y - bbox.minZ) / bboxD) * imageH));
+  const sw = Math.max(1, Math.min(imageW - sx, (room.w / bboxW) * imageW));
+  const sh = Math.max(1, Math.min(imageH - sy, (room.h / bboxD) * imageH));
 
-// In-place UV update for the floor quad (first 4 vertices) — avoids
-// a full geometry rebuild when only the layout bbox shifts.
-function applyFloorUV(geo: THREE.BufferGeometry, uv: number[]) {
-  const uvAttr = geo.getAttribute("uv") as THREE.BufferAttribute;
-  for (let i = 0; i < 4; i++) {
-    uvAttr.setXY(i, uv[i * 2], uv[i * 2 + 1]);
+  const key = `${sx.toFixed(1)},${sy.toFixed(1)},${sw.toFixed(1)},${sh.toFixed(1)}`;
+  const existing = cache.get(room.id);
+  if (existing && existing.key === key) return existing.texture;
+
+  const canvas = existing?.canvas ?? document.createElement("canvas");
+  const w = Math.max(1, Math.round(sw));
+  const h = Math.max(1, Math.round(sh));
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d")!;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, w, h);
+
+  if (existing) {
+    existing.texture.needsUpdate = true;
+    existing.key = key;
+    return existing.texture;
   }
-  uvAttr.needsUpdate = true;
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  cache.set(room.id, { canvas, texture, key });
+  return texture;
 }
 
-// Open-top box: floor (group 0) + 4 walls (group 1), with UV coords for texture
-function createOpenBoxGeo(
-  w: number,
-  wallHeight: number,
-  h: number,
-  floorUV?: number[],
-): THREE.BufferGeometry {
+// Open-top box: floor (group 0) + 4 walls (group 1), default 0-1 UVs
+function createOpenBoxGeo(w: number, wallHeight: number, h: number): THREE.BufferGeometry {
   const hw = w / 2, hh = wallHeight / 2, hd = h / 2;
   const pos: number[] = [], nor: number[] = [], uvs: number[] = [], idx: number[] = [];
 
@@ -82,17 +95,16 @@ function createOpenBoxGeo(
     v0: [number, number, number], v1: [number, number, number],
     v2: [number, number, number], v3: [number, number, number],
     nx: number, ny: number, nz: number,
-    uvOverride?: number[],
   ) => {
     const b = pos.length / 3;
     pos.push(...v0, ...v1, ...v2, ...v3);
     for (let i = 0; i < 4; i++) nor.push(nx, ny, nz);
-    uvs.push(...(uvOverride ?? FULL_FLOOR_UV));
+    uvs.push(...DEFAULT_UV);
     idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
   };
 
   // Floor: normal +Y
-  addQuad([-hw, -hh, hd], [hw, -hh, hd], [hw, -hh, -hd], [-hw, -hh, -hd], 0, 1, 0, floorUV);
+  addQuad([-hw, -hh, hd], [hw, -hh, hd], [hw, -hh, -hd], [-hw, -hh, -hd], 0, 1, 0);
   // Wall +X
   addQuad([hw, -hh, hd], [hw, -hh, -hd], [hw, hh, -hd], [hw, hh, hd], 1, 0, 0);
   // Wall -X
@@ -149,11 +161,14 @@ export default function ThreeViewer({
 
   // Cached room metadata — skip geometry rebuild when dimensions unchanged
   const roomDimsRef = useRef<Map<string, { w: number; h: number; wh: number }>>(new Map());
-  // Bounding box (meters) of all rooms — used to crop the floor-plan texture
+  // Bounding box (meters) of all rooms, frozen at initial layout — stable
+  // reference frame for cropping each room's floor texture
   const layoutBBoxRef = useRef<BBox | null>(null);
-  // Shared floor-plan texture — single instance reused by every room's floor material
-  const floorTextureRef = useRef<THREE.Texture | null>(null);
-  const [textureVersion, setTextureVersion] = useState(0);
+  // Loaded floor-plan source image, used to crop per-room floor textures
+  const floorImageRef = useRef<HTMLImageElement | null>(null);
+  // Per-room cropped floor textures (each room owns an independent texture)
+  const roomCropMapRef = useRef<Map<string, RoomTextureEntry>>(new Map());
+  const [imageVersion, setImageVersion] = useState(0);
 
   const roomsRef = useRef<Room[]>(rooms);
   const onSelectRoomRef = useRef(onSelectRoom);
@@ -180,14 +195,15 @@ export default function ThreeViewer({
   };
 
   const buildRoom = useCallback((room: Room, roomIndex: number) => {
-    const floorUV = layoutBBoxRef.current
-      ? computeFloorUV(room, layoutBBoxRef.current)
-      : FULL_FLOOR_UV;
-    const geo = createOpenBoxGeo(room.w, room.wallHeight, room.h, floorUV);
+    const geo = createOpenBoxGeo(room.w, room.wallHeight, room.h);
     const roomColor = ROOM_COLORS[roomIndex % ROOM_COLORS.length];
 
+    const floorMap = floorImageRef.current && layoutBBoxRef.current
+      ? getRoomFloorTexture(room, floorImageRef.current, layoutBBoxRef.current, roomCropMapRef.current)
+      : null;
+
     const floorMat = new THREE.MeshPhysicalMaterial({
-      map: floorTextureRef.current,
+      map: floorMap,
       color: 0xffffff,
       transparent: true,
       opacity: 0.82,
@@ -324,41 +340,46 @@ export default function ThreeViewer({
     };
   }, []);
 
-  // Load the shared floor-plan texture, reused across every room's floor material
+  // Load the floor-plan source image used to crop each room's floor texture.
+  // A fresh image invalidates the frozen layout bbox and all cached crops.
   useEffect(() => {
+    const clearCrops = () => {
+      roomCropMapRef.current.forEach((entry) => entry.texture.dispose());
+      roomCropMapRef.current.clear();
+    };
+
     if (!floorPlanImageUrl) {
-      if (floorTextureRef.current) {
-        floorTextureRef.current.dispose();
-        floorTextureRef.current = null;
-        setTextureVersion((v) => v + 1);
-      }
+      floorImageRef.current = null;
+      layoutBBoxRef.current = null;
+      clearCrops();
+      setImageVersion((v) => v + 1);
       return;
     }
 
     let cancelled = false;
-    const loader = new THREE.TextureLoader();
-    loader.setCrossOrigin("anonymous");
-    loader.load(floorPlanImageUrl, (tex) => {
-      if (cancelled) {
-        tex.dispose();
-        return;
-      }
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.wrapS = THREE.ClampToEdgeWrapping;
-      tex.wrapT = THREE.ClampToEdgeWrapping;
-      tex.minFilter = THREE.LinearFilter;
-      floorTextureRef.current = tex;
-      setTextureVersion((v) => v + 1);
-    });
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      if (cancelled) return;
+      floorImageRef.current = img;
+      layoutBBoxRef.current = null;
+      clearCrops();
+      setImageVersion((v) => v + 1);
+    };
+    img.src = floorPlanImageUrl;
 
     return () => {
       cancelled = true;
-      if (floorTextureRef.current) {
-        floorTextureRef.current.dispose();
-        floorTextureRef.current = null;
-      }
     };
   }, [floorPlanImageUrl]);
+
+  // Dispose all cached per-room crop textures on unmount
+  useEffect(() => {
+    return () => {
+      roomCropMapRef.current.forEach((entry) => entry.texture.dispose());
+      roomCropMapRef.current.clear();
+    };
+  }, []);
 
   // Sync rooms to scene — avoids geometry rebuild when only position changed
   useEffect(() => {
@@ -368,9 +389,13 @@ export default function ThreeViewer({
     const stale = new Set(meshMapRef.current.keys());
     const draggingId = dragRoomIdRef.current;
 
-    const newBBox = computeRoomsBBox(rooms);
-    const bboxChanged = !bboxEquals(layoutBBoxRef.current, newBBox);
-    layoutBBoxRef.current = newBBox;
+    // Freeze the layout bbox once when rooms are first populated; reset
+    // when the floor plan is cleared so the next one gets a fresh bbox.
+    if (rooms.length === 0) {
+      layoutBBoxRef.current = null;
+    } else if (!layoutBBoxRef.current) {
+      layoutBBoxRef.current = computeRoomsBBox(rooms);
+    }
 
     rooms.forEach((room, idx) => {
       stale.delete(room.id);
@@ -387,24 +412,24 @@ export default function ThreeViewer({
         const dimsChanged = !prev || prev.w !== room.w || prev.h !== room.h || prev.wh !== room.wallHeight;
         if (dimsChanged) {
           existing.geometry.dispose();
-          existing.geometry = createOpenBoxGeo(room.w, room.wallHeight, room.h, computeFloorUV(room, newBBox));
+          existing.geometry = createOpenBoxGeo(room.w, room.wallHeight, room.h);
           const edgeSeg = edgesMapRef.current.get(room.id);
           if (edgeSeg) {
             edgeSeg.geometry.dispose();
             edgeSeg.geometry = new THREE.EdgesGeometry(existing.geometry);
           }
           roomDimsRef.current.set(room.id, { w: room.w, h: room.h, wh: room.wallHeight });
-        } else if (bboxChanged) {
-          // Cheap in-place UV update — no geometry rebuild needed
-          applyFloorUV(existing.geometry, computeFloorUV(room, newBBox));
         }
 
         const mats = existing.material as THREE.MeshPhysicalMaterial[];
 
-        // Apply the shared floor-plan texture once it (re)loads
-        if (mats[0].map !== floorTextureRef.current) {
-          mats[0].map = floorTextureRef.current;
-          mats[0].needsUpdate = true;
+        // Re-crop this room's own floor texture if its footprint changed
+        if (floorImageRef.current && layoutBBoxRef.current) {
+          const tex = getRoomFloorTexture(room, floorImageRef.current, layoutBBoxRef.current, roomCropMapRef.current);
+          if (mats[0].map !== tex) {
+            mats[0].map = tex;
+            mats[0].needsUpdate = true;
+          }
         }
 
         // Selection highlight on wall material
@@ -432,8 +457,13 @@ export default function ThreeViewer({
         edgesMapRef.current.delete(id);
         roomDimsRef.current.delete(id);
       }
+      const cropEntry = roomCropMapRef.current.get(id);
+      if (cropEntry) {
+        cropEntry.texture.dispose();
+        roomCropMapRef.current.delete(id);
+      }
     });
-  }, [rooms, selectedRoomId, buildRoom, textureVersion]);
+  }, [rooms, selectedRoomId, buildRoom, imageVersion]);
 
   // ✓ button: enter active move mode
   const handleConfirm = useCallback(() => {
