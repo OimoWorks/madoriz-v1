@@ -55,6 +55,9 @@ export default function FileUpload({ onFile, loading }: FileUploadProps) {
             間取り図をドラッグ&ドロップ
           </p>
           <p className="text-sm text-gray-400">または クリックして選択（PNG / JPG / PDF）</p>
+          <p className="text-xs text-gray-400 mt-3">
+            部屋名（リビング・トイレ・廊下など）と区画線がはっきり記載された間取り図ほど、AI解析の精度が上がります
+          </p>
         </>
       )}
     </div>
