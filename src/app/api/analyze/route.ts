@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
 
     const message = await client.messages.create({
       model: "claude-sonnet-4-5",
-      max_tokens: 1024,
+      max_tokens: 2048,
       messages: [
         {
           role: "user",
@@ -44,8 +44,14 @@ export async function POST(req: NextRequest) {
             {
               type: "text",
               text: `添付の間取り図を解析し、各部屋の配置をJSON形式のみで返してください。
-座標はメートル単位、x/yは左上原点、説明文は不要。
-例：{"rooms":[{"name":"リビング","x":0,"y":0,"w":5.4,"h":4.2,"wallHeight":2.4}],"note":"3LDK想定"}`,
+
+ルール:
+- リビング・寝室・和室などの主要な部屋だけでなく、トイレ・浴室・洗面所・玄関・廊下・クローゼット・収納・バルコニーなど、間取り図に書かれているすべての区画を個別の部屋として抽出すること。
+- 各部屋の矩形(x, y, w, h)は、間取り図上の壁の内側の実寸に対応させ、他のどの部屋の矩形とも重ならないようにすること。
+- 座標はメートル単位、x/yは矩形の左上を原点（間取り図全体の左上が(0,0)）とする。
+- 説明文は不要。JSONのみを返すこと。
+
+例：{"rooms":[{"name":"リビング","x":0,"y":0,"w":5.4,"h":4.2,"wallHeight":2.4},{"name":"トイレ","x":5.4,"y":0,"w":1.0,"h":1.6,"wallHeight":2.4}],"note":"3LDK想定"}`,
             },
           ],
         },
