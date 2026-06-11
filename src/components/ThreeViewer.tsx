@@ -19,12 +19,6 @@ interface BBox {
   maxZ: number;
 }
 
-interface RoomTextureEntry {
-  canvas: HTMLCanvasElement;
-  texture: THREE.CanvasTexture;
-  key: string;
-}
-
 // Bounding box (in meters) covering all rooms at initial layout — frozen
 // once computed so it stays a stable reference frame for texture cropping
 // even as individual rooms are moved/resized afterward.
@@ -43,13 +37,14 @@ function computeRoomsBBox(rooms: Room[]): BBox {
 }
 
 // Crops the source floor-plan image to the pixel rectangle covered by this
-// room (relative to the frozen layout bbox), reusing the room's own canvas
-// and texture instance when only the source rectangle changes.
-function getRoomFloorTexture(
+// room (relative to the frozen layout bbox) at the time the room was first
+// built. The resulting texture is fixed to the room — moving it later does
+// not change which part of the floor plan it shows; resizing simply
+// stretches the same cropped image over the new floor footprint (UVs stay 0-1).
+function createRoomFloorTexture(
   room: Room,
   image: HTMLImageElement,
   bbox: BBox,
-  cache: Map<string, RoomTextureEntry>,
 ): THREE.CanvasTexture {
   const bboxW = bbox.maxX - bbox.minX;
   const bboxD = bbox.maxZ - bbox.minZ;
@@ -61,28 +56,14 @@ function getRoomFloorTexture(
   const sw = Math.max(1, Math.min(imageW - sx, (room.w / bboxW) * imageW));
   const sh = Math.max(1, Math.min(imageH - sy, (room.h / bboxD) * imageH));
 
-  const key = `${sx.toFixed(1)},${sy.toFixed(1)},${sw.toFixed(1)},${sh.toFixed(1)}`;
-  const existing = cache.get(room.id);
-  if (existing && existing.key === key) return existing.texture;
-
-  const canvas = existing?.canvas ?? document.createElement("canvas");
-  const w = Math.max(1, Math.round(sw));
-  const h = Math.max(1, Math.round(sh));
-  canvas.width = w;
-  canvas.height = h;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(sw));
+  canvas.height = Math.max(1, Math.round(sh));
   const ctx = canvas.getContext("2d")!;
-  ctx.clearRect(0, 0, w, h);
-  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, w, h);
-
-  if (existing) {
-    existing.texture.needsUpdate = true;
-    existing.key = key;
-    return existing.texture;
-  }
+  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  cache.set(room.id, { canvas, texture, key });
   return texture;
 }
 
@@ -166,8 +147,9 @@ export default function ThreeViewer({
   const layoutBBoxRef = useRef<BBox | null>(null);
   // Loaded floor-plan source image, used to crop per-room floor textures
   const floorImageRef = useRef<HTMLImageElement | null>(null);
-  // Per-room cropped floor textures (each room owns an independent texture)
-  const roomCropMapRef = useRef<Map<string, RoomTextureEntry>>(new Map());
+  // Per-room cropped floor textures, created once and fixed to the room
+  // (each room owns an independent texture)
+  const roomCropMapRef = useRef<Map<string, THREE.CanvasTexture>>(new Map());
   const [imageVersion, setImageVersion] = useState(0);
 
   const roomsRef = useRef<Room[]>(rooms);
@@ -198,9 +180,11 @@ export default function ThreeViewer({
     const geo = createOpenBoxGeo(room.w, room.wallHeight, room.h);
     const roomColor = ROOM_COLORS[roomIndex % ROOM_COLORS.length];
 
-    const floorMap = floorImageRef.current && layoutBBoxRef.current
-      ? getRoomFloorTexture(room, floorImageRef.current, layoutBBoxRef.current, roomCropMapRef.current)
-      : null;
+    let floorMap: THREE.CanvasTexture | null = null;
+    if (floorImageRef.current && layoutBBoxRef.current) {
+      floorMap = createRoomFloorTexture(room, floorImageRef.current, layoutBBoxRef.current);
+      roomCropMapRef.current.set(room.id, floorMap);
+    }
 
     const floorMat = new THREE.MeshPhysicalMaterial({
       map: floorMap,
@@ -344,7 +328,7 @@ export default function ThreeViewer({
   // A fresh image invalidates the frozen layout bbox and all cached crops.
   useEffect(() => {
     const clearCrops = () => {
-      roomCropMapRef.current.forEach((entry) => entry.texture.dispose());
+      roomCropMapRef.current.forEach((tex) => tex.dispose());
       roomCropMapRef.current.clear();
     };
 
@@ -376,7 +360,7 @@ export default function ThreeViewer({
   // Dispose all cached per-room crop textures on unmount
   useEffect(() => {
     return () => {
-      roomCropMapRef.current.forEach((entry) => entry.texture.dispose());
+      roomCropMapRef.current.forEach((tex) => tex.dispose());
       roomCropMapRef.current.clear();
     };
   }, []);
@@ -423,13 +407,15 @@ export default function ThreeViewer({
 
         const mats = existing.material as THREE.MeshPhysicalMaterial[];
 
-        // Re-crop this room's own floor texture if its footprint changed
-        if (floorImageRef.current && layoutBBoxRef.current) {
-          const tex = getRoomFloorTexture(room, floorImageRef.current, layoutBBoxRef.current, roomCropMapRef.current);
-          if (mats[0].map !== tex) {
-            mats[0].map = tex;
-            mats[0].needsUpdate = true;
-          }
+        // Crop this room's floor texture once (e.g. when the floor plan
+        // image finishes loading after the mesh was already built). Once
+        // set, the texture is fixed to the room — moving/resizing it never
+        // triggers a re-crop, only a stretch via the geometry's 0-1 UVs.
+        if (!roomCropMapRef.current.has(room.id) && floorImageRef.current && layoutBBoxRef.current) {
+          const tex = createRoomFloorTexture(room, floorImageRef.current, layoutBBoxRef.current);
+          roomCropMapRef.current.set(room.id, tex);
+          mats[0].map = tex;
+          mats[0].needsUpdate = true;
         }
 
         // Selection highlight on wall material
@@ -457,9 +443,9 @@ export default function ThreeViewer({
         edgesMapRef.current.delete(id);
         roomDimsRef.current.delete(id);
       }
-      const cropEntry = roomCropMapRef.current.get(id);
-      if (cropEntry) {
-        cropEntry.texture.dispose();
+      const cropTex = roomCropMapRef.current.get(id);
+      if (cropTex) {
+        cropTex.dispose();
         roomCropMapRef.current.delete(id);
       }
     });
