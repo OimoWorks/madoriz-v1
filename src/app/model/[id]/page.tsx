@@ -59,6 +59,7 @@ export default function ModelPage({ params }: { params: { id: string } }) {
           onSelectRoom={() => {}}
           onMoveRoom={() => {}}
           readonly
+          floorPlanImageUrl={model.image_url}
         />
         <RoomLegend rooms={model.rooms} note={model.note} />
         <div className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm rounded-md px-2 py-1 text-xs text-gray-500">

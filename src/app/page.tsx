@@ -232,6 +232,7 @@ export default function HomePage() {
                 selectedRoomId={selectedRoomId}
                 onSelectRoom={setSelectedRoomId}
                 onMoveRoom={handleMoveRoom}
+                floorPlanImageUrl={imageUrl}
               />
               <RoomLegend rooms={rooms} note={note} />
               <div className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm rounded-md px-2 py-1 text-xs text-gray-500">

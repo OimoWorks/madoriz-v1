@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Room } from "@/lib/types";
@@ -10,8 +10,71 @@ const ROOM_COLORS = [
   0xff922b, 0x20c997, 0xf06595, 0x74c0fc, 0xa9e34b,
 ];
 
+const FULL_FLOOR_UV = [0, 0, 1, 0, 1, 1, 0, 1];
+
+interface BBox {
+  minX: number;
+  minZ: number;
+  maxX: number;
+  maxZ: number;
+}
+
+// Bounding box (in meters) covering all rooms — used as the proxy
+// "image area" for cropping the floor plan texture per room.
+function computeRoomsBBox(rooms: Room[]): BBox {
+  if (rooms.length === 0) return { minX: 0, minZ: 0, maxX: 1, maxZ: 1 };
+  let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+  for (const r of rooms) {
+    minX = Math.min(minX, r.x);
+    minZ = Math.min(minZ, r.y);
+    maxX = Math.max(maxX, r.x + r.w);
+    maxZ = Math.max(maxZ, r.y + r.h);
+  }
+  if (maxX - minX < 1e-6) maxX = minX + 1;
+  if (maxZ - minZ < 1e-6) maxZ = minZ + 1;
+  return { minX, minZ, maxX, maxZ };
+}
+
+function bboxEquals(a: BBox | null, b: BBox): boolean {
+  if (!a) return false;
+  const eps = 1e-6;
+  return (
+    Math.abs(a.minX - b.minX) < eps &&
+    Math.abs(a.minZ - b.minZ) < eps &&
+    Math.abs(a.maxX - b.maxX) < eps &&
+    Math.abs(a.maxZ - b.maxZ) < eps
+  );
+}
+
+// Maps a room's footprint within the layout bbox to a UV rectangle
+// on the shared floor-plan texture.
+function computeFloorUV(room: Room, bbox: BBox): number[] {
+  const w = bbox.maxX - bbox.minX;
+  const d = bbox.maxZ - bbox.minZ;
+  const uLeft = (room.x - bbox.minX) / w;
+  const uRight = (room.x + room.w - bbox.minX) / w;
+  const vBottom = 1 - (room.y + room.h - bbox.minZ) / d;
+  const vTop = 1 - (room.y - bbox.minZ) / d;
+  return [uLeft, vBottom, uRight, vBottom, uRight, vTop, uLeft, vTop];
+}
+
+// In-place UV update for the floor quad (first 4 vertices) — avoids
+// a full geometry rebuild when only the layout bbox shifts.
+function applyFloorUV(geo: THREE.BufferGeometry, uv: number[]) {
+  const uvAttr = geo.getAttribute("uv") as THREE.BufferAttribute;
+  for (let i = 0; i < 4; i++) {
+    uvAttr.setXY(i, uv[i * 2], uv[i * 2 + 1]);
+  }
+  uvAttr.needsUpdate = true;
+}
+
 // Open-top box: floor (group 0) + 4 walls (group 1), with UV coords for texture
-function createOpenBoxGeo(w: number, wallHeight: number, h: number): THREE.BufferGeometry {
+function createOpenBoxGeo(
+  w: number,
+  wallHeight: number,
+  h: number,
+  floorUV?: number[],
+): THREE.BufferGeometry {
   const hw = w / 2, hh = wallHeight / 2, hd = h / 2;
   const pos: number[] = [], nor: number[] = [], uvs: number[] = [], idx: number[] = [];
 
@@ -19,16 +82,17 @@ function createOpenBoxGeo(w: number, wallHeight: number, h: number): THREE.Buffe
     v0: [number, number, number], v1: [number, number, number],
     v2: [number, number, number], v3: [number, number, number],
     nx: number, ny: number, nz: number,
+    uvOverride?: number[],
   ) => {
     const b = pos.length / 3;
     pos.push(...v0, ...v1, ...v2, ...v3);
     for (let i = 0; i < 4; i++) nor.push(nx, ny, nz);
-    uvs.push(0, 0,  1, 0,  1, 1,  0, 1);
+    uvs.push(...(uvOverride ?? FULL_FLOOR_UV));
     idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
   };
 
   // Floor: normal +Y
-  addQuad([-hw, -hh, hd], [hw, -hh, hd], [hw, -hh, -hd], [-hw, -hh, -hd], 0, 1, 0);
+  addQuad([-hw, -hh, hd], [hw, -hh, hd], [hw, -hh, -hd], [-hw, -hh, -hd], 0, 1, 0, floorUV);
   // Wall +X
   addQuad([hw, -hh, hd], [hw, -hh, -hd], [hw, hh, -hd], [hw, hh, hd], 1, 0, 0);
   // Wall -X
@@ -48,39 +112,13 @@ function createOpenBoxGeo(w: number, wallHeight: number, h: number): THREE.Buffe
   return geo;
 }
 
-// Pick white or black text based on perceived luminance of the background color
-function pickTextColor(hex: number): string {
-  const r = (hex >> 16) & 0xff;
-  const g = (hex >> 8) & 0xff;
-  const b = hex & 0xff;
-  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.55 ? "#000000" : "#ffffff";
-}
-
-function createFloorTexture(name: string, colorHex: number): THREE.CanvasTexture {
-  const size = 256;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d")!;
-
-  ctx.fillStyle = `#${colorHex.toString(16).padStart(6, "0")}`;
-  ctx.fillRect(0, 0, size, size);
-
-  ctx.fillStyle = pickTextColor(colorHex);
-  ctx.font = "bold 24px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(name, size / 2, size / 2);
-
-  return new THREE.CanvasTexture(canvas);
-}
-
 interface ThreeViewerProps {
   rooms: Room[];
   selectedRoomId: string | null;
   onSelectRoom: (id: string | null) => void;
   onMoveRoom: (id: string, x: number, y: number) => void;
   readonly?: boolean;
+  floorPlanImageUrl?: string | null;
 }
 
 export default function ThreeViewer({
@@ -89,6 +127,7 @@ export default function ThreeViewer({
   onSelectRoom,
   onMoveRoom,
   readonly = false,
+  floorPlanImageUrl = null,
 }: ThreeViewerProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const actionBtnRef = useRef<HTMLDivElement>(null);
@@ -108,9 +147,13 @@ export default function ThreeViewer({
   const mouseRef = useRef(new THREE.Vector2());
   const pointerDownPosRef = useRef({ x: 0, y: 0 });
 
-  // Cached room metadata — skip geometry/texture rebuild when unchanged
+  // Cached room metadata — skip geometry rebuild when dimensions unchanged
   const roomDimsRef = useRef<Map<string, { w: number; h: number; wh: number }>>(new Map());
-  const roomNamesRef = useRef<Map<string, string>>(new Map());
+  // Bounding box (meters) of all rooms — used to crop the floor-plan texture
+  const layoutBBoxRef = useRef<BBox | null>(null);
+  // Shared floor-plan texture — single instance reused by every room's floor material
+  const floorTextureRef = useRef<THREE.Texture | null>(null);
+  const [textureVersion, setTextureVersion] = useState(0);
 
   const roomsRef = useRef<Room[]>(rooms);
   const onSelectRoomRef = useRef(onSelectRoom);
@@ -136,37 +179,49 @@ export default function ThreeViewer({
     };
   };
 
-  const buildRoom = useCallback((room: Room, colorIdx: number) => {
-    const geo = createOpenBoxGeo(room.w, room.wallHeight, room.h);
+  const buildRoom = useCallback((room: Room, roomIndex: number) => {
+    const floorUV = layoutBBoxRef.current
+      ? computeFloorUV(room, layoutBBoxRef.current)
+      : FULL_FLOOR_UV;
+    const geo = createOpenBoxGeo(room.w, room.wallHeight, room.h, floorUV);
+    const roomColor = ROOM_COLORS[roomIndex % ROOM_COLORS.length];
 
-    const floorMat = new THREE.MeshStandardMaterial({
-      map: createFloorTexture(room.name, ROOM_COLORS[colorIdx % ROOM_COLORS.length]),
-      roughness: 0.7,
-      metalness: 0,
-    });
-    const wallMat = new THREE.MeshStandardMaterial({
+    const floorMat = new THREE.MeshPhysicalMaterial({
+      map: floorTextureRef.current,
       color: 0xffffff,
+      transparent: true,
+      opacity: 0.82,
       roughness: 0.3,
-      metalness: 0,
+      metalness: 0.0,
+      depthWrite: false,
+    });
+    const wallMat = new THREE.MeshPhysicalMaterial({
+      color: roomColor,
+      transparent: true,
+      opacity: 0.15,
+      roughness: 0.05,
+      metalness: 0.1,
       side: THREE.DoubleSide,
+      depthWrite: false,
     });
 
     const mesh = new THREE.Mesh(geo, [floorMat, wallMat]);
     mesh.position.set(room.x + room.w / 2, room.wallHeight / 2, room.y + room.h / 2);
     mesh.userData.roomId = room.id;
-    mesh.userData.colorIdx = colorIdx;
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    mesh.userData.colorIdx = roomIndex;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    mesh.renderOrder = roomIndex;
 
     const edges = new THREE.EdgesGeometry(geo);
     const lineSegs = new THREE.LineSegments(
       edges,
-      new THREE.LineBasicMaterial({ color: 0xaaaaaa }),
+      new THREE.LineBasicMaterial({ color: roomColor, transparent: true, opacity: 0.6 }),
     );
+    lineSegs.renderOrder = roomIndex + 0.5;
     mesh.add(lineSegs);
 
     roomDimsRef.current.set(room.id, { w: room.w, h: room.h, wh: room.wallHeight });
-    roomNamesRef.current.set(room.id, room.name);
 
     return { mesh, lineSegs };
   }, []);
@@ -177,8 +232,8 @@ export default function ThreeViewer({
     const el = mountRef.current;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xdde8f0);
-    scene.fog = new THREE.Fog(0xdde8f0, 60, 120);
+    scene.background = new THREE.Color(0x05070d);
+    scene.fog = new THREE.Fog(0x05070d, 50, 140);
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(45, el.clientWidth / el.clientHeight, 0.1, 1000);
@@ -189,38 +244,27 @@ export default function ThreeViewer({
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(el.clientWidth, el.clientHeight);
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.enabled = false;
+    renderer.sortObjects = true;
     el.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    scene.add(new THREE.AmbientLight(0xc8d8e8, 0.7));
-    scene.add(new THREE.HemisphereLight(0xddeeff, 0xc8b89a, 0.4));
+    scene.add(new THREE.AmbientLight(0x4060a0, 0.6));
+    scene.add(new THREE.HemisphereLight(0x88aaff, 0x0a0e18, 0.5));
 
-    const dirLight = new THREE.DirectionalLight(0xfffaf0, 1.1);
+    const dirLight = new THREE.DirectionalLight(0xaaccff, 0.8);
     dirLight.position.set(15, 28, 12);
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 2048;
-    dirLight.shadow.mapSize.height = 2048;
-    dirLight.shadow.camera.near = 1;
-    dirLight.shadow.camera.far = 100;
-    dirLight.shadow.camera.left = -30;
-    dirLight.shadow.camera.right = 30;
-    dirLight.shadow.camera.top = 30;
-    dirLight.shadow.camera.bottom = -30;
-    dirLight.shadow.bias = -0.001;
     scene.add(dirLight);
 
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(100, 100),
-      new THREE.MeshLambertMaterial({ color: 0xc8c0a8 }),
+      new THREE.MeshStandardMaterial({ color: 0x0d1320, roughness: 1, metalness: 0 }),
     );
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = -0.01;
-    ground.receiveShadow = true;
     scene.add(ground);
 
-    const grid = new THREE.GridHelper(60, 60, 0xb0a890, 0xb8b0a0);
+    const grid = new THREE.GridHelper(60, 60, 0x2a3a55, 0x18222f);
     grid.position.y = 0.001;
     scene.add(grid);
 
@@ -280,6 +324,42 @@ export default function ThreeViewer({
     };
   }, []);
 
+  // Load the shared floor-plan texture, reused across every room's floor material
+  useEffect(() => {
+    if (!floorPlanImageUrl) {
+      if (floorTextureRef.current) {
+        floorTextureRef.current.dispose();
+        floorTextureRef.current = null;
+        setTextureVersion((v) => v + 1);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin("anonymous");
+    loader.load(floorPlanImageUrl, (tex) => {
+      if (cancelled) {
+        tex.dispose();
+        return;
+      }
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.minFilter = THREE.LinearFilter;
+      floorTextureRef.current = tex;
+      setTextureVersion((v) => v + 1);
+    });
+
+    return () => {
+      cancelled = true;
+      if (floorTextureRef.current) {
+        floorTextureRef.current.dispose();
+        floorTextureRef.current = null;
+      }
+    };
+  }, [floorPlanImageUrl]);
+
   // Sync rooms to scene — avoids geometry rebuild when only position changed
   useEffect(() => {
     const scene = sceneRef.current;
@@ -287,6 +367,10 @@ export default function ThreeViewer({
 
     const stale = new Set(meshMapRef.current.keys());
     const draggingId = dragRoomIdRef.current;
+
+    const newBBox = computeRoomsBBox(rooms);
+    const bboxChanged = !bboxEquals(layoutBBoxRef.current, newBBox);
+    layoutBBoxRef.current = newBBox;
 
     rooms.forEach((room, idx) => {
       stale.delete(room.id);
@@ -303,28 +387,30 @@ export default function ThreeViewer({
         const dimsChanged = !prev || prev.w !== room.w || prev.h !== room.h || prev.wh !== room.wallHeight;
         if (dimsChanged) {
           existing.geometry.dispose();
-          existing.geometry = createOpenBoxGeo(room.w, room.wallHeight, room.h);
+          existing.geometry = createOpenBoxGeo(room.w, room.wallHeight, room.h, computeFloorUV(room, newBBox));
           const edgeSeg = edgesMapRef.current.get(room.id);
           if (edgeSeg) {
             edgeSeg.geometry.dispose();
             edgeSeg.geometry = new THREE.EdgesGeometry(existing.geometry);
           }
           roomDimsRef.current.set(room.id, { w: room.w, h: room.h, wh: room.wallHeight });
+        } else if (bboxChanged) {
+          // Cheap in-place UV update — no geometry rebuild needed
+          applyFloorUV(existing.geometry, computeFloorUV(room, newBBox));
         }
 
-        // Rebuild floor texture when name or dims changed
-        const nameChanged = roomNamesRef.current.get(room.id) !== room.name;
-        if (nameChanged || dimsChanged) {
-          const mats = existing.material as THREE.MeshStandardMaterial[];
-          if (mats[0].map) mats[0].map.dispose();
-          mats[0].map = createFloorTexture(room.name, ROOM_COLORS[existing.userData.colorIdx % ROOM_COLORS.length]);
+        const mats = existing.material as THREE.MeshPhysicalMaterial[];
+
+        // Apply the shared floor-plan texture once it (re)loads
+        if (mats[0].map !== floorTextureRef.current) {
+          mats[0].map = floorTextureRef.current;
           mats[0].needsUpdate = true;
-          roomNamesRef.current.set(room.id, room.name);
         }
 
         // Selection highlight on wall material
-        const mats = existing.material as THREE.MeshStandardMaterial[];
-        mats[1].emissive.set(room.id === selectedRoomId ? 0x221100 : 0x000000);
+        const isSelected = room.id === selectedRoomId;
+        mats[1].emissive.set(isSelected ? 0x442200 : 0x000000);
+        mats[1].opacity = isSelected ? 0.35 : 0.15;
       } else {
         const { mesh, lineSegs } = buildRoom(room, idx);
         scene.add(mesh);
@@ -341,18 +427,13 @@ export default function ThreeViewer({
         const mats = Array.isArray(mesh.material)
           ? (mesh.material as THREE.Material[])
           : [mesh.material as THREE.Material];
-        mats.forEach((m) => {
-          const sm = m as THREE.MeshStandardMaterial;
-          if (sm.map) sm.map.dispose();
-          m.dispose();
-        });
+        mats.forEach((m) => m.dispose());
         meshMapRef.current.delete(id);
         edgesMapRef.current.delete(id);
         roomDimsRef.current.delete(id);
-        roomNamesRef.current.delete(id);
       }
     });
-  }, [rooms, selectedRoomId, buildRoom]);
+  }, [rooms, selectedRoomId, buildRoom, textureVersion]);
 
   // ✓ button: enter active move mode
   const handleConfirm = useCallback(() => {
