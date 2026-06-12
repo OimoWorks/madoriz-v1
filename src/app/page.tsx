@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import FileUpload from "@/components/FileUpload";
 import EditPanel from "@/components/EditPanel";
 import RoomLegend from "@/components/RoomLegend";
+import FloorPlan2DEditor from "@/components/FloorPlan2DEditor";
 import { Room } from "@/lib/types";
 import { uploadFloorPlanImage } from "@/lib/supabase";
 import { renderPdfPageToBase64 } from "@/lib/pdf-utils";
@@ -26,6 +27,7 @@ export default function HomePage() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [viewMode, setViewMode] = useState<"3d" | "2d">("3d");
 
   const handleFile = async (file: File) => {
     setError(null);
@@ -227,16 +229,53 @@ export default function HomePage() {
             </div>
 
             <div className="flex-1 relative">
-              <ThreeViewer
-                rooms={rooms}
-                selectedRoomId={selectedRoomId}
-                onSelectRoom={setSelectedRoomId}
-                onMoveRoom={handleMoveRoom}
-                floorPlanImageUrl={imageUrl}
-              />
-              <RoomLegend rooms={rooms} note={note} />
+              {viewMode === "3d" ? (
+                <ThreeViewer
+                  rooms={rooms}
+                  selectedRoomId={selectedRoomId}
+                  onSelectRoom={setSelectedRoomId}
+                  onMoveRoom={handleMoveRoom}
+                  floorPlanImageUrl={imageUrl}
+                />
+              ) : imageUrl ? (
+                <FloorPlan2DEditor
+                  imageUrl={imageUrl}
+                  rooms={rooms}
+                  selectedRoomId={selectedRoomId}
+                  onSelectRoom={setSelectedRoomId}
+                  onUpdateRoom={handleUpdateRoom}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-full text-sm text-gray-400">
+                  間取り図画像がありません
+                </div>
+              )}
+
+              <div className="absolute top-3 left-3 bg-white/90 backdrop-blur-sm rounded-md shadow-sm flex overflow-hidden text-xs font-medium z-10">
+                <button
+                  onClick={() => setViewMode("3d")}
+                  className={`px-3 py-1.5 transition-colors ${
+                    viewMode === "3d" ? "bg-blue-600 text-white" : "text-gray-600 hover:bg-gray-100"
+                  }`}
+                >
+                  3Dビュー
+                </button>
+                <button
+                  onClick={() => setViewMode("2d")}
+                  disabled={!imageUrl}
+                  className={`px-3 py-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                    viewMode === "2d" ? "bg-blue-600 text-white" : "text-gray-600 hover:bg-gray-100"
+                  }`}
+                >
+                  2D補正
+                </button>
+              </div>
+
+              {viewMode === "3d" && <RoomLegend rooms={rooms} note={note} />}
               <div className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm rounded-md px-2 py-1 text-xs text-gray-500">
-                クリック：選択　ドラッグ：移動　スクロール：ズーム
+                {viewMode === "3d"
+                  ? "クリック：選択　ドラッグ：移動　スクロール：ズーム"
+                  : "ドラッグ：移動　右下ハンドル：リサイズ"}
               </div>
             </div>
           </>

@@ -4,37 +4,10 @@ import { useEffect, useRef, useCallback, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Room } from "@/lib/types";
-
-const ROOM_COLORS = [
-  0x4a9eff, 0xff6b6b, 0x51cf66, 0xffd43b, 0xcc5de8,
-  0xff922b, 0x20c997, 0xf06595, 0x74c0fc, 0xa9e34b,
-];
+import { ROOM_COLORS } from "@/lib/colors";
+import { BBox, computeRoomsBBox } from "@/lib/geometry";
 
 const DEFAULT_UV = [0, 0, 1, 0, 1, 1, 0, 1];
-
-interface BBox {
-  minX: number;
-  minZ: number;
-  maxX: number;
-  maxZ: number;
-}
-
-// Bounding box (in meters) covering all rooms at initial layout — frozen
-// once computed so it stays a stable reference frame for texture cropping
-// even as individual rooms are moved/resized afterward.
-function computeRoomsBBox(rooms: Room[]): BBox {
-  if (rooms.length === 0) return { minX: 0, minZ: 0, maxX: 1, maxZ: 1 };
-  let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
-  for (const r of rooms) {
-    minX = Math.min(minX, r.x);
-    minZ = Math.min(minZ, r.y);
-    maxX = Math.max(maxX, r.x + r.w);
-    maxZ = Math.max(maxZ, r.y + r.h);
-  }
-  if (maxX - minX < 1e-6) maxX = minX + 1;
-  if (maxZ - minZ < 1e-6) maxZ = minZ + 1;
-  return { minX, minZ, maxX, maxZ };
-}
 
 // Crops the source floor-plan image to the pixel rectangle covered by this
 // room (relative to the frozen layout bbox) at the time the room was first
