@@ -5,7 +5,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Room } from "@/lib/types";
 import { ROOM_COLORS } from "@/lib/colors";
-import { BBox, computeRoomsBBox } from "@/lib/geometry";
+import { BBox } from "@/lib/geometry";
 
 const DEFAULT_UV = [0, 0, 1, 0, 1, 1, 0, 1];
 
@@ -85,6 +85,7 @@ interface ThreeViewerProps {
   onMoveRoom: (id: string, x: number, y: number) => void;
   readonly?: boolean;
   floorPlanImageUrl?: string | null;
+  bbox?: BBox | null;
 }
 
 export default function ThreeViewer({
@@ -94,6 +95,7 @@ export default function ThreeViewer({
   onMoveRoom,
   readonly = false,
   floorPlanImageUrl = null,
+  bbox = null,
 }: ThreeViewerProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const actionBtnRef = useRef<HTMLDivElement>(null);
@@ -115,9 +117,10 @@ export default function ThreeViewer({
 
   // Cached room metadata — skip geometry rebuild when dimensions unchanged
   const roomDimsRef = useRef<Map<string, { w: number; h: number; wh: number }>>(new Map());
-  // Bounding box (meters) of all rooms, frozen at initial layout — stable
-  // reference frame for cropping each room's floor texture
-  const layoutBBoxRef = useRef<BBox | null>(null);
+  // Bounding box (meters) of all rooms, frozen at initial layout by the
+  // parent and passed in as a prop — stable reference frame for cropping
+  // each room's floor texture, shared with the 2D editor
+  const layoutBBoxRef = useRef<BBox | null>(bbox);
   // Loaded floor-plan source image, used to crop per-room floor textures
   const floorImageRef = useRef<HTMLImageElement | null>(null);
   // Per-room cropped floor textures, created once and fixed to the room
@@ -131,6 +134,16 @@ export default function ThreeViewer({
   useEffect(() => { roomsRef.current = rooms; }, [rooms]);
   useEffect(() => { onSelectRoomRef.current = onSelectRoom; }, [onSelectRoom]);
   useEffect(() => { onMoveRoomRef.current = onMoveRoom; }, [onMoveRoom]);
+
+  // Keep the layout bbox in sync with the frozen value owned by the parent.
+  // When it changes (e.g. becomes available after analysis), invalidate any
+  // cached crops so floor textures are recropped against the correct bbox.
+  useEffect(() => {
+    layoutBBoxRef.current = bbox;
+    roomCropMapRef.current.forEach((tex) => tex.dispose());
+    roomCropMapRef.current.clear();
+    setImageVersion((v) => v + 1);
+  }, [bbox]);
 
   // Reset move mode when selection is cleared externally
   useEffect(() => {
@@ -307,7 +320,6 @@ export default function ThreeViewer({
 
     if (!floorPlanImageUrl) {
       floorImageRef.current = null;
-      layoutBBoxRef.current = null;
       clearCrops();
       setImageVersion((v) => v + 1);
       return;
@@ -319,7 +331,6 @@ export default function ThreeViewer({
     img.onload = () => {
       if (cancelled) return;
       floorImageRef.current = img;
-      layoutBBoxRef.current = null;
       clearCrops();
       setImageVersion((v) => v + 1);
     };
@@ -345,14 +356,6 @@ export default function ThreeViewer({
 
     const stale = new Set(meshMapRef.current.keys());
     const draggingId = dragRoomIdRef.current;
-
-    // Freeze the layout bbox once when rooms are first populated; reset
-    // when the floor plan is cleared so the next one gets a fresh bbox.
-    if (rooms.length === 0) {
-      layoutBBoxRef.current = null;
-    } else if (!layoutBBoxRef.current) {
-      layoutBBoxRef.current = computeRoomsBBox(rooms);
-    }
 
     rooms.forEach((room, idx) => {
       stale.delete(room.id);

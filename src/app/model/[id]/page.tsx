@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import RoomLegend from "@/components/RoomLegend";
 import { FloorPlanModel } from "@/lib/types";
+import { computeRoomsBBox } from "@/lib/geometry";
 
 const ThreeViewer = dynamic(() => import("@/components/ThreeViewer"), { ssr: false });
 
@@ -22,6 +23,13 @@ export default function ModelPage({ params }: { params: { id: string } }) {
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, [params.id]);
+
+  // Frozen bbox computed once from the saved room layout — stable coordinate
+  // reference frame for cropping floor textures from the floor plan image.
+  const bbox = useMemo(
+    () => (model && model.rooms.length > 0 ? computeRoomsBBox(model.rooms) : null),
+    [model]
+  );
 
   if (loading) {
     return (
@@ -60,6 +68,7 @@ export default function ModelPage({ params }: { params: { id: string } }) {
           onMoveRoom={() => {}}
           readonly
           floorPlanImageUrl={model.image_url}
+          bbox={bbox}
         />
         <RoomLegend rooms={model.rooms} note={model.note} />
         <div className="absolute top-3 right-3 bg-white/80 backdrop-blur-sm rounded-md px-2 py-1 text-xs text-gray-500">

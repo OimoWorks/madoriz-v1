@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import FileUpload from "@/components/FileUpload";
 import EditPanel from "@/components/EditPanel";
 import RoomLegend from "@/components/RoomLegend";
 import FloorPlan2DEditor from "@/components/FloorPlan2DEditor";
 import { Room } from "@/lib/types";
+import { BBox, computeRoomsBBox } from "@/lib/geometry";
 import { uploadFloorPlanImage } from "@/lib/supabase";
 import { renderPdfPageToBase64 } from "@/lib/pdf-utils";
 import { exportFloorPlanPdf } from "@/lib/export-pdf";
@@ -28,6 +29,11 @@ export default function HomePage() {
   const [copied, setCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [viewMode, setViewMode] = useState<"3d" | "2d">("3d");
+
+  // Bounding box (meters) of the AI's initial room layout — frozen once at
+  // analysis time so 3D/2D views share one stable coordinate-to-image mapping,
+  // independent of later manual position/size edits.
+  const bboxRef = useRef<BBox | null>(null);
 
   const handleFile = async (file: File) => {
     setError(null);
@@ -63,6 +69,7 @@ export default function HomePage() {
       const analyzedRooms: Room[] = (data.rooms || []).map(
         (r: Omit<Room, "id">) => ({ ...r, id: uid() })
       );
+      bboxRef.current = analyzedRooms.length > 0 ? computeRoomsBBox(analyzedRooms) : null;
       setRooms(analyzedRooms);
       setNote(data.note || "");
     } catch (e) {
@@ -220,6 +227,7 @@ export default function HomePage() {
                     setImageUrl(null);
                     setShareUrl(null);
                     setSelectedRoomId(null);
+                    bboxRef.current = null;
                   }}
                   className="w-full text-sm text-gray-500 hover:text-gray-700 py-1"
                 >
@@ -236,6 +244,7 @@ export default function HomePage() {
                   onSelectRoom={setSelectedRoomId}
                   onMoveRoom={handleMoveRoom}
                   floorPlanImageUrl={imageUrl}
+                  bbox={bboxRef.current}
                 />
               ) : imageUrl ? (
                 <FloorPlan2DEditor
@@ -244,6 +253,7 @@ export default function HomePage() {
                   selectedRoomId={selectedRoomId}
                   onSelectRoom={setSelectedRoomId}
                   onUpdateRoom={handleUpdateRoom}
+                  bbox={bboxRef.current}
                 />
               ) : (
                 <div className="flex items-center justify-center h-full text-sm text-gray-400">

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Room } from "@/lib/types";
-import { computeRoomsBBox } from "@/lib/geometry";
+import { BBox } from "@/lib/geometry";
 import { ROOM_COLORS } from "@/lib/colors";
 
 interface FloorPlan2DEditorProps {
@@ -11,6 +11,7 @@ interface FloorPlan2DEditorProps {
   selectedRoomId: string | null;
   onSelectRoom: (id: string | null) => void;
   onUpdateRoom: (room: Room) => void;
+  bbox: BBox | null;
 }
 
 type DragMode = "move" | "resize";
@@ -50,22 +51,16 @@ export default function FloorPlan2DEditor({
   selectedRoomId,
   onSelectRoom,
   onUpdateRoom,
+  bbox,
 }: FloorPlan2DEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const roomsRef = useRef<Room[]>(rooms);
   const onUpdateRoomRef = useRef(onUpdateRoom);
+  const bboxRef = useRef<BBox | null>(bbox);
   useEffect(() => { roomsRef.current = rooms; }, [rooms]);
   useEffect(() => { onUpdateRoomRef.current = onUpdateRoom; }, [onUpdateRoom]);
-
-  // Frozen bbox — stable reference frame mapping room coordinates (meters)
-  // onto the floor plan image, independent of subsequent edits.
-  const bboxRef = useRef<ReturnType<typeof computeRoomsBBox> | null>(null);
-  if (rooms.length === 0) {
-    bboxRef.current = null;
-  } else if (!bboxRef.current) {
-    bboxRef.current = computeRoomsBBox(rooms);
-  }
+  useEffect(() => { bboxRef.current = bbox; }, [bbox]);
 
   const [, forceRender] = useState(0);
 
@@ -148,7 +143,6 @@ export default function FloorPlan2DEditor({
     forceRender((v) => v + 1);
   };
 
-  const bbox = bboxRef.current;
   const bboxW = bbox ? bbox.maxX - bbox.minX : 1;
   const bboxH = bbox ? bbox.maxZ - bbox.minZ : 1;
 
