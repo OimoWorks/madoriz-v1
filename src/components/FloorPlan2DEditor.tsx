@@ -15,17 +15,34 @@ interface FloorPlan2DEditorProps {
 
 type DragMode = "move" | "resize";
 
+// Resize handle directions: 4 corners + 4 edges (Excel-like)
+type ResizeDir = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
+
 interface DragState {
   id: string;
   mode: DragMode;
+  dir?: ResizeDir;
   startX: number;
   startY: number;
   orig: { x: number; y: number; w: number; h: number };
 }
 
+const MIN_SIZE = 0.5;
+
 const round1 = (n: number) => parseFloat(n.toFixed(1));
 
 const toHexColor = (n: number) => `#${n.toString(16).padStart(6, "0")}`;
+
+const RESIZE_HANDLES: { dir: ResizeDir; top: string; left: string; cursor: string }[] = [
+  { dir: "nw", top: "0%", left: "0%", cursor: "nwse-resize" },
+  { dir: "n", top: "0%", left: "50%", cursor: "ns-resize" },
+  { dir: "ne", top: "0%", left: "100%", cursor: "nesw-resize" },
+  { dir: "e", top: "50%", left: "100%", cursor: "ew-resize" },
+  { dir: "se", top: "100%", left: "100%", cursor: "nwse-resize" },
+  { dir: "s", top: "100%", left: "50%", cursor: "ns-resize" },
+  { dir: "sw", top: "100%", left: "0%", cursor: "nesw-resize" },
+  { dir: "w", top: "50%", left: "0%", cursor: "ew-resize" },
+];
 
 export default function FloorPlan2DEditor({
   imageUrl,
@@ -76,10 +93,30 @@ export default function FloorPlan2DEditor({
           y: round1(drag.orig.y + dyMeters),
         });
       } else {
+        const dir = drag.dir!;
+        let { x, y, w, h } = drag.orig;
+
+        if (dir.includes("e")) {
+          w = Math.max(MIN_SIZE, drag.orig.w + dxMeters);
+        }
+        if (dir.includes("w")) {
+          w = Math.max(MIN_SIZE, drag.orig.w - dxMeters);
+          x = drag.orig.x + (drag.orig.w - w);
+        }
+        if (dir.includes("s")) {
+          h = Math.max(MIN_SIZE, drag.orig.h + dyMeters);
+        }
+        if (dir.includes("n")) {
+          h = Math.max(MIN_SIZE, drag.orig.h - dyMeters);
+          y = drag.orig.y + (drag.orig.h - h);
+        }
+
         onUpdateRoomRef.current({
           ...room,
-          w: round1(Math.max(0.5, drag.orig.w + dxMeters)),
-          h: round1(Math.max(0.5, drag.orig.h + dyMeters)),
+          x: round1(x),
+          y: round1(y),
+          w: round1(w),
+          h: round1(h),
         });
       }
     };
@@ -96,13 +133,14 @@ export default function FloorPlan2DEditor({
     };
   }, []);
 
-  const startDrag = (e: React.MouseEvent, room: Room, mode: DragMode) => {
+  const startDrag = (e: React.MouseEvent, room: Room, mode: DragMode, dir?: ResizeDir) => {
     e.preventDefault();
     e.stopPropagation();
     onSelectRoom(room.id);
     dragRef.current = {
       id: room.id,
       mode,
+      dir,
       startX: e.clientX,
       startY: e.clientY,
       orig: { x: room.x, y: room.y, w: room.w, h: room.h },
@@ -154,19 +192,24 @@ export default function FloorPlan2DEditor({
               >
                 {room.name}
               </span>
-              <div
-                onMouseDown={(e) => startDrag(e, room, "resize")}
-                style={{
-                  position: "absolute",
-                  right: -4,
-                  bottom: -4,
-                  width: 12,
-                  height: 12,
-                  background: color,
-                  border: "1px solid white",
-                  cursor: "nwse-resize",
-                }}
-              />
+              {RESIZE_HANDLES.map((handle) => (
+                <div
+                  key={handle.dir}
+                  onMouseDown={(e) => startDrag(e, room, "resize", handle.dir)}
+                  style={{
+                    position: "absolute",
+                    top: handle.top,
+                    left: handle.left,
+                    width: 10,
+                    height: 10,
+                    transform: "translate(-50%, -50%)",
+                    background: color,
+                    border: "1px solid white",
+                    cursor: handle.cursor,
+                    boxSizing: "border-box",
+                  }}
+                />
+              ))}
             </div>
           );
         })}
